@@ -1,0 +1,96 @@
+const std = @import("std");
+const app = @import("app");
+const battery = @import("battery");
+const build_options = @import("build_options");
+const cli = @import("cli");
+const support = @import("support");
+
+fn writeAll(fd: c_int, bytes: []const u8) void {
+    var remaining = bytes;
+
+    // Consume partial or interrupted writes; output failures cannot be reported recursively.
+    while (remaining.len > 0) {
+        const written = support.c.write(fd, remaining.ptr, remaining.len);
+        if (written > 0) {
+            remaining = remaining[@intCast(written)..];
+        } else if (written < 0 and support.lastErrno() == support.c.EINTR) {
+            continue;
+        } else {
+            return;
+        }
+    }
+}
+
+fn writeFailure(failure: *const support.ErrorMessage) void {
+    writeAll(support.c.STDERR_FILENO, "airpodsctl: ");
+    writeAll(support.c.STDERR_FILENO, failure.text());
+    writeAll(support.c.STDERR_FILENO, "\n");
+}
+
+fn writeBatteryLine(component: battery.Component, reading: ?battery.Reading) void {
+    var buffer: [64]u8 = undefined;
+    writeAll(support.c.STDOUT_FILENO, if (reading) |value|
+        std.fmt.bufPrint(
+            &buffer,
+            "{s} {d} {s}\n",
+            .{ component.name(), value.level, value.state.name() },
+        ) catch return
+    else
+        std.fmt.bufPrint(&buffer, "{s} unavailable\n", .{component.name()}) catch return);
+}
+
+fn writeResult(result: app.Result) void {
+    switch (result) {
+        .mode => |mode| {
+            writeAll(support.c.STDOUT_FILENO, mode.name());
+            writeAll(support.c.STDOUT_FILENO, "\n");
+        },
+        .battery => |value| if (value.component) |component| {
+            var buffer: [4]u8 = undefined;
+            writeAll(
+                support.c.STDOUT_FILENO,
+                std.fmt.bufPrint(&buffer, "{d}\n", .{value.report.get(component).?.level}) catch return,
+            );
+        } else {
+            // Keep aggregate output stable even when a closed case is not reported.
+            writeBatteryLine(.left, value.report.left);
+            writeBatteryLine(.right, value.report.right);
+            writeBatteryLine(.case, value.report.case);
+        },
+    }
+}
+
+fn execute(command: cli.Command) u8 {
+    var failure = support.ErrorMessage{};
+    writeResult(app.run(command, &failure) catch {
+        writeFailure(&failure);
+        return 1;
+    });
+
+    return 0;
+}
+
+pub fn main(init: std.process.Init) u8 {
+    const arguments = init.minimal.args.toSlice(init.arena.allocator()) catch {
+        var failure = support.ErrorMessage{};
+        failure.set("cannot read command-line arguments", .{});
+        writeFailure(&failure);
+        return 1;
+    };
+
+    return switch (cli.parseInvocation(arguments)) {
+        .help => result: {
+            writeAll(support.c.STDOUT_FILENO, cli.usage);
+            break :result 0;
+        },
+        .version => result: {
+            writeAll(support.c.STDOUT_FILENO, "airpodsctl " ++ build_options.version ++ "\n");
+            break :result 0;
+        },
+        .usage => result: {
+            writeAll(support.c.STDERR_FILENO, cli.usage);
+            break :result 2;
+        },
+        .execute => |command| execute(command),
+    };
+}
