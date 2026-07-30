@@ -2,7 +2,10 @@ const std = @import("std");
 const aacp = @import("aacp");
 const battery = @import("battery");
 const cli = @import("cli");
+const controller = @import("controller");
+const ipc = @import("ipc");
 const noise_control = @import("noise_control");
+const operations = @import("command");
 const support = @import("support");
 const transport = @import("transport");
 
@@ -19,6 +22,12 @@ const feature_flags_packet = [_]u8{
 };
 const notification_request_packet = [_]u8{
     0x04, 0x00, 0x04, 0x00, 0x0f, 0x00, 0xff, 0xff, 0xff, 0xff,
+};
+const battery_report_packet = [_]u8{
+    0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x03,
+    0x02, 0x01, 100,  0x02, 0x01, 0x04, 0x01,
+    99,   0x01, 0x01, 0x08, 0x01, 17,   0x02,
+    0x01,
 };
 
 const ResponseBehavior = enum {
@@ -44,7 +53,7 @@ const NoiseEmulatorContext = struct {
 };
 
 const NoiseExchangeResult = struct {
-    result: ?noise_control.Result,
+    result: ?noise_control.Mode,
     failure: support.ErrorMessage,
 };
 
@@ -56,6 +65,11 @@ const BatteryEmulatorContext = struct {
 const BatteryExchangeResult = struct {
     report: ?battery.Report,
     failure: support.ErrorMessage,
+};
+
+const PersistentEmulatorContext = struct {
+    fd: c_int,
+    status: u8 = 0,
 };
 
 fn receiveExpected(fd: c_int, expected: []const u8) bool {
@@ -137,21 +151,26 @@ fn runNoiseExchange(exchange: *const NoiseExchange) !NoiseExchangeResult {
     var context = NoiseEmulatorContext{ .fd = sockets[1], .exchange = exchange };
     const emulator = try std.Thread.spawn(.{}, runNoiseEmulator, .{&context});
     var exchange_result = NoiseExchangeResult{ .result = null, .failure = .{} };
-    var session = aacp.Session.initialize(
+    const deadline_ms = transport.nowMs() + @as(i64, if (exchange.behavior == .timeout) 50 else 1000);
+    var control = controller.Controller{ .session = aacp.Session.initialize(
         sockets[0],
-        transport.nowMs() + @as(i64, if (exchange.behavior == .timeout) 50 else 1000),
+        deadline_ms,
         0,
         &exchange_result.failure,
     ) catch |failure| {
         _ = c.close(sockets[0]);
         emulator.join();
         return failure;
+    } };
+    var operation = operations.NoiseControl{
+        .action = exchange.action,
+        .toggle_mode_count = exchange.toggle_modes.len,
     };
-    exchange_result.result = noise_control.run(
-        &session,
-        exchange.action,
-        exchange.toggle_modes,
-    ) catch null;
+    @memcpy(operation.toggle_modes[0..exchange.toggle_modes.len], exchange.toggle_modes);
+    if (control.run(
+        .{ .noise_control = operation },
+        deadline_ms,
+    ) catch null) |result| exchange_result.result = result.mode;
     _ = c.close(sockets[0]);
     emulator.join();
 
@@ -160,18 +179,11 @@ fn runNoiseExchange(exchange: *const NoiseExchange) !NoiseExchangeResult {
 }
 
 fn emulateBatteryExchange(fd: c_int) u8 {
-    const report = [_]u8{
-        0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x03,
-        0x02, 0x01, 100,  0x02, 0x01, 0x04, 0x01,
-        99,   0x01, 0x01, 0x08, 0x01, 17,   0x02,
-        0x01,
-    };
-
     if (!receiveInitialization(fd)) return 1;
 
     // A listening-mode event arriving first must not be mistaken for a battery response.
     if (!sendMode(fd, @intFromEnum(noise_control.Mode.adaptive))) return 2;
-    return if (c.send(fd, &report, report.len, 0) == report.len) 0 else 3;
+    return if (c.send(fd, &battery_report_packet, battery_report_packet.len, 0) == battery_report_packet.len) 0 else 3;
 }
 
 fn runBatteryEmulator(context: *BatteryEmulatorContext) void {
@@ -187,22 +199,47 @@ fn runBatteryExchange(component: ?battery.Component) !BatteryExchangeResult {
     var context = BatteryEmulatorContext{ .fd = sockets[1] };
     const emulator = try std.Thread.spawn(.{}, runBatteryEmulator, .{&context});
     var exchange_result = BatteryExchangeResult{ .report = null, .failure = .{} };
-    var session = aacp.Session.initialize(
+    const deadline_ms = transport.nowMs() + 1000;
+    var control = controller.Controller{ .session = aacp.Session.initialize(
         sockets[0],
-        transport.nowMs() + 1000,
+        deadline_ms,
         0,
         &exchange_result.failure,
     ) catch |failure| {
         _ = c.close(sockets[0]);
         emulator.join();
         return failure;
-    };
-    exchange_result.report = battery.get(&session, component) catch null;
+    } };
+    if (control.run(.{ .battery = component }, deadline_ms) catch null) |result| {
+        exchange_result.report = result.battery.report;
+    }
     _ = c.close(sockets[0]);
     emulator.join();
 
     try std.testing.expectEqual(@as(u8, 0), context.status);
     return exchange_result;
+}
+
+fn runPersistentEmulator(context: *PersistentEmulatorContext) void {
+    const anc_command = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0d,
+        0x02, 0x00, 0x00, 0x00,
+    };
+
+    // Distinct statuses identify which expected stage failed after the single initialization.
+    context.status = if (!receiveInitialization(context.fd))
+        1
+    else if (c.send(context.fd, &battery_report_packet, battery_report_packet.len, 0) != battery_report_packet.len)
+        2
+    else if (!sendMode(context.fd, @intFromEnum(noise_control.Mode.off)))
+        3
+    else if (!receiveExpected(context.fd, &anc_command))
+        4
+    else if (!sendMode(context.fd, @intFromEnum(noise_control.Mode.noise_cancellation)))
+        5
+    else
+        0;
+    _ = c.close(context.fd);
 }
 
 test "noise-control names and command parsing" {
@@ -266,8 +303,7 @@ test "successful noise-control exchanges" {
     for (&test_cases) |*exchange| {
         const exchange_result = try runNoiseExchange(exchange);
         try std.testing.expect(exchange_result.result != null);
-        try std.testing.expectEqual(exchange.current_mode, exchange_result.result.?.initial_mode);
-        try std.testing.expectEqual(exchange.target_mode, exchange_result.result.?.final_mode);
+        try std.testing.expectEqual(exchange.target_mode, exchange_result.result.?);
     }
 }
 
@@ -305,17 +341,85 @@ test "battery command parsing" {
     try std.testing.expectEqual(battery.Component.case, selected.execute.operation.battery.?);
 }
 
+test "session command parsing" {
+    const serve = cli.parseInvocation(&.{ "airpodsctl", "--device", "18:3F:70:6F:A1:06", "serve" });
+    const required = cli.parseInvocation(&.{ "airpodsctl", "battery", "left", "--session" });
+    const direct = cli.parseInvocation(&.{ "airpodsctl", "--direct", "status" });
+
+    try std.testing.expect(serve == .serve);
+    try std.testing.expectEqualStrings("18:3F:70:6F:A1:06", serve.serve.requested_address.?);
+    try std.testing.expectEqual(cli.Backend.session, required.execute.backend);
+    try std.testing.expectEqual(cli.Backend.direct, direct.execute.backend);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "--direct", "status" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "serve" }) == .usage);
+}
+
+test "IPC request and response encoding" {
+    var packet: [512]u8 = undefined;
+    var noise_request = operations.NoiseControl{ .action = .toggle, .toggle_mode_count = 2 };
+    noise_request.toggle_modes[0] = .off;
+    noise_request.toggle_modes[1] = .adaptive;
+    const decoded_request = try ipc.decodeRequest(try ipc.encodeRequest(&packet, .{
+        .requested_address = "18:3F:70:6F:A1:06",
+        .backend = .session,
+        .operation = .{ .noise_control = noise_request },
+    }));
+
+    try std.testing.expectEqualStrings("18:3F:70:6F:A1:06", decoded_request.requested_address.?);
+    try std.testing.expectEqual(noise_control.Action.toggle, decoded_request.operation.noise_control.action);
+    try std.testing.expectEqual(@as(usize, 2), decoded_request.operation.noise_control.toggle_mode_count);
+    try std.testing.expectEqual(noise_control.Mode.adaptive, decoded_request.operation.noise_control.toggle_modes[1]);
+
+    var failure = support.ErrorMessage{};
+    const decoded_result = try ipc.decodeResult(ipc.encodeResult(&packet, .{ .battery = .{
+        .component = .case,
+        .report = .{ .case = .{ .level = 17, .state = .discharging } },
+    } }), &failure);
+    try std.testing.expectEqual(@as(u8, 17), decoded_result.battery.report.case.?.level);
+    try std.testing.expectEqual(battery.State.discharging, decoded_result.battery.report.case.?.state);
+
+    try std.testing.expectError(
+        error.RemoteFailure,
+        ipc.decodeResult(ipc.encodeFailure(&packet, "AirPods are unavailable"), &failure),
+    );
+    try std.testing.expectEqualStrings("AirPods are unavailable", failure.text());
+    try std.testing.expectError(error.InvalidRequest, ipc.encodeRequest(&packet, .{
+        .requested_address = "invalid",
+        .backend = .session,
+        .operation = .{ .battery = .left },
+    }));
+    try std.testing.expectError(error.InvalidRequest, ipc.decodeRequest("invalid"));
+}
+
+test "IPC packet transport preserves and bounds messages" {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+
+    var failure = support.ErrorMessage{};
+    var received: [32]u8 = undefined;
+    const deadline_ms = transport.nowMs() + 1000;
+    try ipc.sendPacket(sockets[0], "request", deadline_ms, &failure);
+    try std.testing.expectEqualStrings(
+        "request",
+        try ipc.receivePacket(sockets[1], &received, deadline_ms, &failure),
+    );
+
+    const oversized = [_]u8{0xaa} ** 64;
+    try ipc.sendPacket(sockets[0], &oversized, deadline_ms, &failure);
+    try std.testing.expectError(
+        error.IpcFailure,
+        ipc.receivePacket(sockets[1], &received, deadline_ms, &failure),
+    );
+    try std.testing.expectEqualStrings("session socket message was too large", failure.text());
+}
+
 test "battery packet parsing" {
     const unrelated = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0d, 0x02 };
-    const packet = [_]u8{
-        0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x03,
-        0x02, 0x01, 100,  0x02, 0x01, 0x04, 0x01,
-        99,   0x01, 0x01, 0x08, 0x01, 17,   0x02,
-        0x01,
-    };
 
     try std.testing.expect(try battery.parsePacket(&unrelated) == null);
-    const report = (try battery.parsePacket(&packet)).?;
+    const report = (try battery.parsePacket(&battery_report_packet)).?;
     try std.testing.expectEqual(@as(u8, 99), report.left.?.level);
     try std.testing.expectEqual(battery.State.charging, report.left.?.state);
     try std.testing.expectEqual(@as(u8, 100), report.right.?.level);
@@ -347,4 +451,41 @@ test "battery exchange filters other feature notifications" {
     try std.testing.expect(exchange_result.report != null);
     try std.testing.expectEqual(@as(u8, 99), exchange_result.report.?.left.?.level);
     try std.testing.expectEqual(@as(usize, 0), exchange_result.failure.text().len);
+}
+
+test "one initialized controller serves sequential cached operations" {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
+
+    var context = PersistentEmulatorContext{ .fd = sockets[1] };
+    const emulator = try std.Thread.spawn(.{}, runPersistentEmulator, .{&context});
+    var failure = support.ErrorMessage{};
+    const deadline_ms = transport.nowMs() + 1000;
+    var control = controller.Controller{ .session = try aacp.Session.initialize(
+        sockets[0],
+        deadline_ms,
+        0,
+        &failure,
+    ) };
+
+    try std.testing.expectEqual(
+        @as(u8, 99),
+        (try control.run(.{ .battery = .left }, deadline_ms)).battery.report.left.?.level,
+    );
+    try std.testing.expectEqual(
+        noise_control.Mode.off,
+        (try control.run(.{ .noise_control = .{ .action = .status } }, deadline_ms)).mode,
+    );
+    try std.testing.expectEqual(
+        noise_control.Mode.noise_cancellation,
+        (try control.run(.{ .noise_control = .{ .action = .anc } }, deadline_ms)).mode,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 17),
+        (try control.run(.{ .battery = .case }, deadline_ms)).battery.report.case.?.level,
+    );
+
+    _ = c.close(sockets[0]);
+    emulator.join();
+    try std.testing.expectEqual(@as(u8, 0), context.status);
 }

@@ -1,13 +1,13 @@
 const std = @import("std");
 const battery = @import("battery");
+const command = @import("command");
 const noise_control = @import("noise_control");
-
-const max_toggle_modes = 4;
 
 pub const usage =
     \\Usage: airpodsctl [--device MAC] COMMAND
     \\       airpodsctl [--device MAC] toggle [MODE...]
     \\       airpodsctl [--device MAC] battery [COMPONENT]
+    \\       airpodsctl [--device MAC] serve
     \\
     \\Commands:
     \\  status        Print the current listening mode
@@ -19,6 +19,7 @@ pub const usage =
     \\                Cycle through MODEs in order (defaults to anc off)
     \\  battery [COMPONENT]
     \\                Print all battery readings or one percentage
+    \\  serve         Keep an AACP session available to later commands
     \\
     \\Toggle modes:
     \\  anc, off, transparency, adaptive
@@ -28,39 +29,43 @@ pub const usage =
     \\
     \\Options:
     \\  -d, --device MAC  Select connected AirPods by Bluetooth address
+    \\      --session     Require a running session service
+    \\      --direct      Bypass the session service
     \\  -h, --help        Show this help
     \\  -V, --version     Show the program version
     \\
 ;
 
-pub const NoiseControlCommand = struct {
-    action: noise_control.Action,
-    toggle_modes: [max_toggle_modes]noise_control.Mode = undefined,
-    toggle_mode_count: usize = 0,
-};
-
-pub const Operation = union(enum) {
-    noise_control: NoiseControlCommand,
-    battery: ?battery.Component,
+pub const Backend = enum {
+    automatic,
+    session,
+    direct,
 };
 
 pub const Command = struct {
     requested_address: ?[]const u8,
-    operation: Operation,
+    backend: Backend,
+    operation: command.Operation,
+};
+
+pub const ServeCommand = struct {
+    requested_address: ?[]const u8,
 };
 
 pub const Invocation = union(enum) {
     help,
     version,
     usage,
+    serve: ServeCommand,
     execute: Command,
 };
 
 pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     // Keep an overflow slot so a fifth toggle mode is rejected by mode-count validation.
-    var positional: [max_toggle_modes + 2][]const u8 = undefined;
+    var positional: [command.max_toggle_modes + 2][]const u8 = undefined;
     var positional_count: usize = 0;
     var requested_address: ?[]const u8 = null;
+    var backend: Backend = .automatic;
     var options_ended = false;
     var index: usize = 1;
 
@@ -81,6 +86,16 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         }
         if (!options_ended and std.mem.startsWith(u8, argument, "--device=")) {
             requested_address = argument["--device=".len..];
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--session")) {
+            if (backend != .automatic) return .usage;
+            backend = .session;
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--direct")) {
+            if (backend != .automatic) return .usage;
+            backend = .direct;
             continue;
         }
         if (!options_ended and std.mem.startsWith(u8, argument, "--")) return .usage;
@@ -111,10 +126,15 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     }
 
     if (positional_count == 0) return .usage;
+    if (std.mem.eql(u8, positional[0], "serve")) {
+        if (positional_count != 1 or backend != .automatic) return .usage;
+        return .{ .serve = .{ .requested_address = requested_address } };
+    }
     if (std.mem.eql(u8, positional[0], "battery")) {
         if (positional_count > 2) return .usage;
         return .{ .execute = .{
             .requested_address = requested_address,
+            .backend = backend,
             .operation = .{ .battery = if (positional_count == 2)
                 battery.Component.parse(positional[1]) orelse return .usage
             else
@@ -124,24 +144,25 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
 
     const action = noise_control.Action.parse(positional[0]) orelse return .usage;
     const toggle_mode_count = positional_count - 1;
-    if ((action != .toggle and toggle_mode_count != 0) or toggle_mode_count > max_toggle_modes) {
+    if ((action != .toggle and toggle_mode_count != 0) or toggle_mode_count > command.max_toggle_modes) {
         return .usage;
     }
 
-    var command = NoiseControlCommand{
+    var noise_command = command.NoiseControl{
         .action = action,
         .toggle_mode_count = toggle_mode_count,
     };
     for (positional[1..positional_count], 0..) |value, mode_index| {
-        command.toggle_modes[mode_index] = noise_control.Mode.parse(value) orelse return .usage;
+        noise_command.toggle_modes[mode_index] = noise_control.Mode.parse(value) orelse return .usage;
 
         // Duplicate entries make a cycle position ambiguous and provide no useful behavior.
-        for (command.toggle_modes[0..mode_index]) |previous| {
-            if (previous == command.toggle_modes[mode_index]) return .usage;
+        for (noise_command.toggle_modes[0..mode_index]) |previous| {
+            if (previous == noise_command.toggle_modes[mode_index]) return .usage;
         }
     }
     return .{ .execute = .{
         .requested_address = requested_address,
-        .operation = .{ .noise_control = command },
+        .backend = backend,
+        .operation = .{ .noise_control = noise_command },
     } };
 }

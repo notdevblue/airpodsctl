@@ -50,11 +50,6 @@ pub const Action = enum {
     }
 };
 
-pub const Result = struct {
-    initial_mode: Mode,
-    final_mode: Mode,
-};
-
 // Distinguish unrelated AACP traffic from malformed listening-mode notifications.
 pub fn parsePacket(packet: []const u8) error{InvalidModePacket}!?Mode {
     if (packet.len < 4 or !std.mem.eql(u8, packet[0..4], listening_mode_prefix[0..4])) return null;
@@ -69,16 +64,7 @@ pub fn parsePacket(packet: []const u8) error{InvalidModePacket}!?Mode {
     return @enumFromInt(packet[7]);
 }
 
-fn receiveMode(session: *aacp.Session) Error!Mode {
-    while (true) {
-        if (parsePacket(try session.receive()) catch {
-            session.channel.failure.set("AirPods returned an invalid listening-mode response", .{});
-            return error.ProtocolFailure;
-        }) |mode| return mode;
-    }
-}
-
-fn targetMode(action: Action, current_mode: Mode, custom_modes: []const Mode) Mode {
+pub fn targetMode(action: Action, current_mode: Mode, custom_modes: []const Mode) Mode {
     const default_modes = [_]Mode{ .noise_cancellation, .off };
 
     // An empty list preserves the original cycle; an unlisted current mode selects its first entry.
@@ -96,39 +82,10 @@ fn targetMode(action: Action, current_mode: Mode, custom_modes: []const Mode) Mo
     };
 }
 
-fn setMode(session: *aacp.Session, mode: Mode) Error!void {
+pub fn setMode(session: *aacp.Session, mode: Mode) Error!void {
     const packet = [_]u8{
         0x04,               0x00, 0x04, 0x00, 0x09, 0x00, 0x0d,
         @intFromEnum(mode), 0x00, 0x00, 0x00,
     };
-    var last_mode: ?Mode = null;
-
     try session.send(&packet);
-
-    // Ignore stale notifications while retaining the last one for a useful failure message.
-    while (receiveMode(session)) |acknowledged_mode| {
-        if (acknowledged_mode == mode) return;
-        last_mode = acknowledged_mode;
-    } else |_| {
-        if (last_mode) |reported_mode| {
-            session.channel.failure.set(
-                "AirPods did not acknowledge {s}; the last reported mode was {s}",
-                .{ mode.name(), reported_mode.name() },
-            );
-        }
-        return error.ProtocolFailure;
-    }
-}
-
-// Perform exactly one status or mode-changing exchange on an initialized session.
-pub fn run(
-    session: *aacp.Session,
-    action: Action,
-    toggle_modes: []const Mode,
-) Error!Result {
-    const initial_mode = try receiveMode(session);
-    const final_mode = targetMode(action, initial_mode, toggle_modes);
-
-    if (action != .status) try setMode(session, final_mode);
-    return .{ .initial_mode = initial_mode, .final_mode = final_mode };
 }

@@ -1,8 +1,8 @@
 const aacp = @import("aacp");
-const battery = @import("battery");
 const bluez = @import("bluez");
 const cli = @import("cli");
-const noise_control = @import("noise_control");
+const controller = @import("controller");
+const operations = @import("command");
 const support = @import("support");
 const transport = @import("transport");
 
@@ -12,16 +12,7 @@ const timeout_ms = 3000;
 const initialization_delay_ms = 150;
 
 pub const Error = aacp.Error || bluez.Error;
-
-pub const BatteryResult = struct {
-    component: ?battery.Component,
-    report: battery.Report,
-};
-
-pub const Result = union(enum) {
-    mode: noise_control.Mode,
-    battery: BatteryResult,
-};
+pub const Result = operations.Result;
 
 // Discover, connect, initialize AACP, and delegate exactly one feature operation.
 pub fn run(command: cli.Command, failure: *support.ErrorMessage) Error!Result {
@@ -34,16 +25,8 @@ pub fn run(command: cli.Command, failure: *support.ErrorMessage) Error!Result {
     );
     defer bluez.close(fd);
 
-    var session = try aacp.Session.initialize(fd, deadline_ms, initialization_delay_ms, failure);
-    return switch (command.operation) {
-        .noise_control => |operation| .{ .mode = (try noise_control.run(
-            &session,
-            operation.action,
-            operation.toggle_modes[0..operation.toggle_mode_count],
-        )).final_mode },
-        .battery => |component| .{ .battery = .{
-            .component = component,
-            .report = try battery.get(&session, component),
-        } },
+    var control = controller.Controller{
+        .session = try aacp.Session.initialize(fd, deadline_ms, initialization_delay_ms, failure),
     };
+    return control.run(command.operation, deadline_ms);
 }

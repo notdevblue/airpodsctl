@@ -1,0 +1,13 @@
+[Unit]
+Description=Persistent AirPods control session
+Documentation=https://github.com/hacel/airpodsctl
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env airpodsctl serve
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

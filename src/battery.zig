@@ -1,10 +1,7 @@
 const std = @import("std");
-const aacp = @import("aacp");
 
 const battery_prefix = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x04, 0x00 };
 const record_size = 5;
-
-pub const Error = aacp.Error;
 
 // Explicit component values are the identifiers used in AACP battery records.
 pub const Component = enum(u8) {
@@ -102,27 +99,4 @@ pub fn parsePacket(packet: []const u8) error{InvalidBatteryPacket}!?Report {
         }
     }
     return report;
-}
-
-// Wait for either the next complete report or one containing the requested component.
-pub fn get(session: *aacp.Session, component: ?Component) Error!Report {
-    var saw_report = false;
-
-    while (session.receive()) |packet| {
-        if (parsePacket(packet) catch {
-            session.channel.failure.set("AirPods returned an invalid battery response", .{});
-            return error.ProtocolFailure;
-        }) |report| {
-            saw_report = true;
-            if (component == null or report.get(component.?) != null) return report;
-        }
-    } else |failure| {
-        if (saw_report) {
-            session.channel.failure.set(
-                "AirPods did not report the {s} battery before the timeout",
-                .{component.?.name()},
-            );
-        }
-        return failure;
-    }
 }

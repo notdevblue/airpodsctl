@@ -3,6 +3,9 @@ const app = @import("app");
 const battery = @import("battery");
 const build_options = @import("build_options");
 const cli = @import("cli");
+const ipc = @import("ipc");
+const operations = @import("command");
+const server = @import("server");
 const support = @import("support");
 
 fn writeAll(fd: c_int, bytes: []const u8) void {
@@ -39,7 +42,7 @@ fn writeBatteryLine(component: battery.Component, reading: ?battery.Reading) voi
         std.fmt.bufPrint(&buffer, "{s} unavailable\n", .{component.name()}) catch return);
 }
 
-fn writeResult(result: app.Result) void {
+fn writeResult(result: operations.Result) void {
     switch (result) {
         .mode => |mode| {
             writeAll(support.c.STDOUT_FILENO, mode.name());
@@ -62,7 +65,14 @@ fn writeResult(result: app.Result) void {
 
 fn execute(command: cli.Command) u8 {
     var failure = support.ErrorMessage{};
-    writeResult(app.run(command, &failure) catch {
+    writeResult(switch (command.backend) {
+        .direct => app.run(command, &failure),
+        .session => ipc.request(command, &failure),
+        .automatic => ipc.request(command, &failure) catch |request_failure| switch (request_failure) {
+            error.Unavailable => app.run(command, &failure),
+            else => request_failure,
+        },
+    } catch {
         writeFailure(&failure);
         return 1;
     });
@@ -90,6 +100,14 @@ pub fn main(init: std.process.Init) u8 {
         .usage => result: {
             writeAll(support.c.STDERR_FILENO, cli.usage);
             break :result 2;
+        },
+        .serve => |configuration| result: {
+            var failure = support.ErrorMessage{};
+            server.run(configuration, &failure) catch {
+                writeFailure(&failure);
+                break :result 1;
+            };
+            break :result 0;
         },
         .execute => |command| execute(command),
     };

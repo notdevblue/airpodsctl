@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(builder: *std.Build) void {
     const target = builder.standardTargetOptions(.{});
     const optimize = builder.standardOptimizeOption(.{});
-    const version = builder.option([]const u8, "version", "program version") orelse "0.4.0";
+    const version = builder.option([]const u8, "version", "program version") orelse "0.5.0";
     const options = builder.addOptions();
     options.addOption([]const u8, "version", version);
 
@@ -34,7 +34,6 @@ pub fn build(builder: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    battery_module.addImport("aacp", aacp_module);
 
     const noise_control_module = builder.createModule(.{
         .root_source_file = builder.path("src/noise_control.zig"),
@@ -43,12 +42,31 @@ pub fn build(builder: *std.Build) void {
     });
     noise_control_module.addImport("aacp", aacp_module);
 
+    const command_module = builder.createModule(.{
+        .root_source_file = builder.path("src/command.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    command_module.addImport("battery", battery_module);
+    command_module.addImport("noise_control", noise_control_module);
+
+    const controller_module = builder.createModule(.{
+        .root_source_file = builder.path("src/controller.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    controller_module.addImport("aacp", aacp_module);
+    controller_module.addImport("battery", battery_module);
+    controller_module.addImport("command", command_module);
+    controller_module.addImport("noise_control", noise_control_module);
+
     const cli_module = builder.createModule(.{
         .root_source_file = builder.path("src/cli.zig"),
         .target = target,
         .optimize = optimize,
     });
     cli_module.addImport("battery", battery_module);
+    cli_module.addImport("command", command_module);
     cli_module.addImport("noise_control", noise_control_module);
 
     const bluez_module = builder.createModule(.{
@@ -65,12 +83,37 @@ pub fn build(builder: *std.Build) void {
         .optimize = optimize,
     });
     app_module.addImport("aacp", aacp_module);
-    app_module.addImport("battery", battery_module);
     app_module.addImport("bluez", bluez_module);
     app_module.addImport("cli", cli_module);
-    app_module.addImport("noise_control", noise_control_module);
+    app_module.addImport("command", command_module);
+    app_module.addImport("controller", controller_module);
     app_module.addImport("support", support_module);
     app_module.addImport("transport", transport_module);
+
+    const ipc_module = builder.createModule(.{
+        .root_source_file = builder.path("src/ipc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_module.addImport("battery", battery_module);
+    ipc_module.addImport("cli", cli_module);
+    ipc_module.addImport("command", command_module);
+    ipc_module.addImport("noise_control", noise_control_module);
+    ipc_module.addImport("support", support_module);
+    ipc_module.addImport("transport", transport_module);
+
+    const server_module = builder.createModule(.{
+        .root_source_file = builder.path("src/server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    server_module.addImport("aacp", aacp_module);
+    server_module.addImport("bluez", bluez_module);
+    server_module.addImport("cli", cli_module);
+    server_module.addImport("controller", controller_module);
+    server_module.addImport("ipc", ipc_module);
+    server_module.addImport("support", support_module);
+    server_module.addImport("transport", transport_module);
 
     // Build and install the Linux command-line executable.
     const executable_module = builder.createModule(.{
@@ -82,6 +125,9 @@ pub fn build(builder: *std.Build) void {
     executable_module.addImport("app", app_module);
     executable_module.addImport("battery", battery_module);
     executable_module.addImport("cli", cli_module);
+    executable_module.addImport("command", command_module);
+    executable_module.addImport("ipc", ipc_module);
+    executable_module.addImport("server", server_module);
     executable_module.addImport("support", support_module);
     executable_module.link_libc = true;
     executable_module.linkSystemLibrary("bluetooth", .{});
@@ -92,6 +138,7 @@ pub fn build(builder: *std.Build) void {
         .root_module = executable_module,
     });
     builder.installArtifact(executable);
+    builder.installFile("contrib/airpodsctl.service", "share/systemd/user/airpodsctl.service");
 
     // Run packet and feature tests against an emulated AirPods peer.
     const test_module = builder.createModule(.{
@@ -102,6 +149,9 @@ pub fn build(builder: *std.Build) void {
     test_module.addImport("aacp", aacp_module);
     test_module.addImport("battery", battery_module);
     test_module.addImport("cli", cli_module);
+    test_module.addImport("command", command_module);
+    test_module.addImport("controller", controller_module);
+    test_module.addImport("ipc", ipc_module);
     test_module.addImport("noise_control", noise_control_module);
     test_module.addImport("support", support_module);
     test_module.addImport("transport", transport_module);
@@ -125,6 +175,10 @@ pub fn build(builder: *std.Build) void {
         &.{ "toggle", "anc", "anc" },
         &.{ "battery", "invalid" },
         &.{ "battery", "left", "right" },
+        &.{ "--session", "--direct", "status" },
+        &.{ "--session", "serve" },
+        &.{ "--direct", "serve" },
+        &.{ "serve", "status" },
     };
 
     const check_step = builder.step("check", "Run tests and command-line checks");

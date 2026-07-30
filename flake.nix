@@ -21,7 +21,7 @@
         rec {
           airpodsctl = pkgs.stdenv.mkDerivation {
             pname = "airpodsctl";
-            version = "0.4.0";
+            version = "0.5.0";
             src = self;
 
             nativeBuildInputs = [
@@ -37,14 +37,14 @@
             buildPhase = ''
               runHook preBuild
               ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache" \
-                zig build -Doptimize=ReleaseSafe -Dversion=0.4.0
+                zig build -Doptimize=ReleaseSafe -Dversion=0.5.0
               runHook postBuild
             '';
             doCheck = true;
             checkPhase = ''
               runHook preCheck
               ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache" \
-                zig build check -Doptimize=ReleaseSafe -Dversion=0.4.0
+                zig build check -Doptimize=ReleaseSafe -Dversion=0.5.0
               runHook postCheck
             '';
             installPhase = ''
@@ -52,7 +52,7 @@
               ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache" \
                 zig build install \
                   -Doptimize=ReleaseSafe \
-                  -Dversion=0.4.0 \
+                  -Dversion=0.5.0 \
                   --prefix "$out"
               runHook postInstall
             '';

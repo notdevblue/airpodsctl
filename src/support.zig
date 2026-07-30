@@ -7,8 +7,12 @@ pub const c = @cImport({
     @cDefine("_GNU_SOURCE", "1");
     @cInclude("errno.h");
     @cInclude("poll.h");
+    @cInclude("signal.h");
+    @cInclude("stdlib.h");
     @cInclude("string.h");
+    @cInclude("sys/stat.h");
     @cInclude("sys/socket.h");
+    @cInclude("sys/un.h");
     @cInclude("time.h");
     @cInclude("unistd.h");
 });
