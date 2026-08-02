@@ -49,6 +49,22 @@ Do not expose routing mutations until captures prove:
 
 If remote-active safety or ownership acknowledgement cannot be proven, retain research/status parsing only and do not ship take, release, or automation.
 
+### Reference-derived packet surface
+
+The following layouts are protocol research inputs, not completed hardware acceptance. Parsers must preserve unknown metadata and fail closed when a field is not understood.
+
+| Opcode | Direction | Reference-derived payload |
+| --- | --- | --- |
+| `0x0009` | Both | Fixed control-command frame. Identifier `0x06` carries local ownership as `0x00` or `0x01`; the remaining three value bytes are zero. |
+| `0x000d` | Host to AirPods | Empty Audio Source request. |
+| `0x000e` | AirPods to host | Six-byte Bluetooth address followed by source state: `0x00` idle, `0x01` call, or `0x02` media. Other states remain unknown. |
+| `0x0010`/`0x0011` | Both | Six-byte address, little-endian payload length, one unknown byte, and an opaque OPACK payload. Version 1 does not interpret or emit these messages. |
+| `0x0014` | Host to AirPods | Count followed by six-byte addresses forming a connection-priority list. Version 1 does not change this list. |
+| `0x002d` | Host to AirPods | Empty Connected Devices request. |
+| `0x002e` | AirPods to host | Two unknown bytes, device count, then count entries containing a six-byte address and two unknown bytes. Accept at most two entries. |
+
+All packets use the existing `04 00 04 00` AACP prefix and a little-endian 16-bit opcode. Initial implementation compares reported addresses with the local L2CAP address in Bluetooth byte order, but this remains a hardware acceptance item. A routing mutation is provisional until a capture proves that a newer `0x09` ownership notification acknowledges it and that `0x000e` reliably describes the other host's activity.
+
 ## Implementation design
 
 ### Protocol and controller state
