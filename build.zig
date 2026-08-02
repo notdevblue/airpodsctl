@@ -84,6 +84,7 @@ pub fn build(builder: *std.Build) void {
     command_module.addImport("battery", battery_module);
     command_module.addImport("ear_detection", ear_detection_module);
     command_module.addImport("noise_control", noise_control_module);
+    command_module.addImport("smart_routing", smart_routing_module);
 
     const controller_module = builder.createModule(.{
         .root_source_file = builder.path("src/controller.zig"),
@@ -96,6 +97,7 @@ pub fn build(builder: *std.Build) void {
     controller_module.addImport("control_command", control_command_module);
     controller_module.addImport("ear_detection", ear_detection_module);
     controller_module.addImport("noise_control", noise_control_module);
+    controller_module.addImport("smart_routing", smart_routing_module);
 
     const cli_module = builder.createModule(.{
         .root_source_file = builder.path("src/cli.zig"),
@@ -167,6 +169,7 @@ pub fn build(builder: *std.Build) void {
     ipc_module.addImport("command", command_module);
     ipc_module.addImport("ear_detection", ear_detection_module);
     ipc_module.addImport("noise_control", noise_control_module);
+    ipc_module.addImport("smart_routing", smart_routing_module);
     ipc_module.addImport("support", support_module);
     ipc_module.addImport("transport", transport_module);
 
@@ -284,6 +287,12 @@ pub fn build(builder: *std.Build) void {
         &.{ "automatic-ear-detection", "invalid" },
         &.{ "automatic-ear-detection", "status", "on" },
         &.{ "wear-status", "extra" },
+        &.{"switching"},
+        &.{ "switching", "invalid" },
+        &.{ "switching", "status", "extra" },
+        &.{ "switching", "status", "--force" },
+        &.{ "switching", "release", "--force" },
+        &.{ "--direct", "switching", "take" },
         &.{ "status", "--pause-on-removal=one" },
         &.{ "serve", "--pause-on-removal=invalid" },
         &.{ "serve", "--pause-on-removal=one", "--pause-on-removal=both" },

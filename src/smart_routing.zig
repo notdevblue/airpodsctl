@@ -132,9 +132,7 @@ pub const State = struct {
     }
 
     pub fn updateAudioSource(self: *State, source: AudioSource, local_address: Address) void {
-        if (self.hosts == .local_and_remote and
-            !std.mem.eql(u8, &source.address, &local_address))
-        {
+        if (!std.mem.eql(u8, &source.address, &local_address)) {
             self.remote_activity = source.state.remoteActivity();
         }
     }
@@ -208,8 +206,9 @@ pub fn requestStatus(session: *aacp.Session) Error!void {
     const connected_devices = encodeEmpty(connected_devices_request_opcode);
     const audio_source = encodeEmpty(audio_source_request_opcode);
 
-    try session.send(&connected_devices);
+    // Send the connected-device request last so its response bounds the status snapshot.
     try session.send(&audio_source);
+    try session.send(&connected_devices);
 }
 
 pub fn setOwnership(session: *aacp.Session, owns: bool) Error!void {

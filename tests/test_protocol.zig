@@ -101,6 +101,24 @@ const EarObserverContext = struct {
     wear_events: usize = 0,
 };
 
+const RoutingExchange = struct {
+    request: operations.Switching,
+    initial_owner: bool,
+    activity: smart_routing.AudioSourceState,
+    acknowledge: bool = true,
+};
+
+const RoutingEmulatorContext = struct {
+    fd: c_int,
+    exchange: *const RoutingExchange,
+    status: u8 = 0,
+};
+
+const RoutingExchangeResult = struct {
+    result: ?smart_routing.Status,
+    failure: support.ErrorMessage,
+};
+
 fn receiveExpected(fd: c_int, expected: []const u8) bool {
     var packet: [128]u8 = undefined;
     const received = c.recv(fd, &packet, packet.len, 0);
@@ -339,6 +357,84 @@ fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
     return exchange_result;
 }
 
+fn sendOwnership(fd: c_int, owns: bool) bool {
+    const packet = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
+        @intFromBool(owns), 0x00, 0x00, 0x00,
+    };
+    return c.send(fd, &packet, packet.len, 0) == packet.len;
+}
+
+fn sendRoutingSnapshot(fd: c_int, exchange: *const RoutingExchange) bool {
+    const audio_source_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x0d, 0x00 };
+    const connected_devices_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x2d, 0x00 };
+    const audio_source = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x0e, 0x00,
+        7, 8, 9, 10, 11, 12, @intFromEnum(exchange.activity),
+    };
+    const connected_devices = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x2e, 0x00, 0, 0, 2,
+        1, 2, 3, 4, 5, 6, 0, 0,
+        7, 8, 9, 10, 11, 12, 0, 0,
+    };
+
+    return receiveExpected(fd, &audio_source_request) and
+        c.send(fd, &audio_source, audio_source.len, 0) == audio_source.len and
+        receiveExpected(fd, &connected_devices_request) and
+        sendOwnership(fd, exchange.initial_owner) and
+        c.send(fd, &connected_devices, connected_devices.len, 0) == connected_devices.len;
+}
+
+fn emulateRoutingExchange(fd: c_int, exchange: *const RoutingExchange) u8 {
+    if (!receiveInitialization(fd) or !sendRoutingSnapshot(fd, exchange)) return 1;
+    if (exchange.request.action == .status or
+        (exchange.request.action == .take and exchange.initial_owner) or
+        (exchange.request.action == .release and !exchange.initial_owner) or
+        (exchange.request.action == .take and !exchange.request.force and exchange.activity != .idle))
+    {
+        return 0;
+    }
+
+    const target_owns = exchange.request.action == .take;
+    const ownership_command = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
+        @intFromBool(target_owns), 0x00, 0x00, 0x00,
+    };
+    if (!receiveExpected(fd, &ownership_command)) return 2;
+    return if (!exchange.acknowledge or sendOwnership(fd, target_owns)) 0 else 3;
+}
+
+fn runRoutingEmulator(context: *RoutingEmulatorContext) void {
+    context.status = emulateRoutingExchange(context.fd, context.exchange);
+    _ = c.close(context.fd);
+}
+
+fn runRoutingExchange(exchange: *const RoutingExchange) !RoutingExchangeResult {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
+
+    var context = RoutingEmulatorContext{ .fd = sockets[1], .exchange = exchange };
+    const emulator = try std.Thread.spawn(.{}, runRoutingEmulator, .{&context});
+    var exchange_result = RoutingExchangeResult{ .result = null, .failure = .{} };
+    const deadline_ms = transport.nowMs() + 1000;
+    var control = controller.Controller{
+        .session = aacp.Session.initialize(sockets[0], deadline_ms, 0, &exchange_result.failure) catch |failure| {
+            _ = c.close(sockets[0]);
+            emulator.join();
+            return failure;
+        },
+        .local_address = .{ 1, 2, 3, 4, 5, 6 },
+    };
+    if (control.run(.{ .switching = exchange.request }, deadline_ms) catch null) |result| {
+        exchange_result.result = result.switching;
+    }
+    _ = c.close(sockets[0]);
+    emulator.join();
+
+    try std.testing.expectEqual(@as(u8, 0), context.status);
+    return exchange_result;
+}
+
 test "noise-control names and command parsing" {
     try std.testing.expectEqualStrings("off", noise_control.Mode.off.name());
     try std.testing.expectEqualStrings("noise-cancellation", noise_control.Mode.noise_cancellation.name());
@@ -452,6 +548,25 @@ test "session command parsing" {
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "serve" }) == .usage);
 }
 
+test "switching commands require the service for mutations" {
+    const status = cli.parseInvocation(&.{ "airpodsctl", "switching", "status" });
+    const take = cli.parseInvocation(&.{ "airpodsctl", "switching", "take" });
+    const forced = cli.parseInvocation(&.{ "airpodsctl", "--force", "switching", "take" });
+    const release = cli.parseInvocation(&.{ "airpodsctl", "switching", "release" });
+
+    try std.testing.expect(status == .execute);
+    try std.testing.expectEqual(cli.Backend.automatic, status.execute.backend);
+    try std.testing.expectEqual(operations.SwitchingAction.status, status.execute.operation.switching.action);
+    try std.testing.expectEqual(cli.Backend.session, take.execute.backend);
+    try std.testing.expectEqual(operations.SwitchingAction.take, take.execute.operation.switching.action);
+    try std.testing.expect(forced.execute.operation.switching.force);
+    try std.testing.expectEqual(cli.Backend.session, release.execute.backend);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--direct", "switching", "take" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "switching", "status", "--force" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "switching", "release", "--force" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "switching", "take", "--force", "--force" }) == .usage);
+}
+
 test "IPC request and response encoding" {
     var packet: [512]u8 = undefined;
     var noise_request = operations.NoiseControl{ .action = .toggle, .toggle_mode_count = 2 };
@@ -491,6 +606,35 @@ test "IPC request and response encoding" {
         .operation = .{ .battery = .left },
     }));
     try std.testing.expectError(error.InvalidRequest, ipc.decodeRequest("invalid"));
+}
+
+test "switching IPC uses version three typed messages" {
+    var packet: [512]u8 = undefined;
+    const decoded_request = try ipc.decodeRequest(try ipc.encodeRequest(&packet, .{
+        .requested_address = null,
+        .backend = .session,
+        .operation = .{ .switching = .{ .action = .take, .force = true } },
+    }));
+
+    try std.testing.expectEqual(ipc.ProtocolVersion.v3, decoded_request.version);
+    try std.testing.expectEqual(operations.SwitchingAction.take, decoded_request.operation.switching.action);
+    try std.testing.expect(decoded_request.operation.switching.force);
+
+    var failure = support.ErrorMessage{};
+    const decoded_result = try ipc.decodeResult(ipc.encodeResult(&packet, .{ .switching = .{
+        .hosts = .local_and_remote,
+        .owner = .linux,
+        .remote_activity = .idle,
+    } }), &failure);
+    try std.testing.expectEqual(smart_routing.Hosts.local_and_remote, decoded_result.switching.hosts);
+    try std.testing.expectEqual(smart_routing.Owner.linux, decoded_result.switching.owner);
+    try std.testing.expectEqual(smart_routing.RemoteActivity.idle, decoded_result.switching.remote_activity);
+
+    packet[0..4].* = "APR2".*;
+    try std.testing.expectError(
+        error.IncompatibleVersion,
+        ipc.decodeResultForVersion(packet[0..9], .v3, &failure),
+    );
 }
 
 test "IPC packet transport preserves and bounds messages" {
@@ -762,6 +906,54 @@ test "ownership control state is strict" {
     invalid = owned;
     invalid.values[0] = 2;
     try std.testing.expectError(error.InvalidOwnershipPacket, smart_routing.parseOwnership(invalid));
+}
+
+test "manual switching requires safe state and a matching acknowledgement" {
+    const status_result = try runRoutingExchange(&.{
+        .request = .{ .action = .status },
+        .initial_owner = false,
+        .activity = .idle,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.remote, status_result.result.?.owner);
+    try std.testing.expectEqualStrings("ready", status_result.result.?.multipointName());
+
+    const take_result = try runRoutingExchange(&.{
+        .request = .{ .action = .take },
+        .initial_owner = false,
+        .activity = .idle,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.linux, take_result.result.?.owner);
+
+    const release_result = try runRoutingExchange(&.{
+        .request = .{ .action = .release },
+        .initial_owner = true,
+        .activity = .idle,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.remote, release_result.result.?.owner);
+
+    const blocked_result = try runRoutingExchange(&.{
+        .request = .{ .action = .take },
+        .initial_owner = false,
+        .activity = .in_call,
+    });
+    try std.testing.expect(blocked_result.result == null);
+    try std.testing.expect(std.mem.indexOf(u8, blocked_result.failure.text(), "--force") != null);
+
+    const forced_result = try runRoutingExchange(&.{
+        .request = .{ .action = .take, .force = true },
+        .initial_owner = false,
+        .activity = .in_call,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.linux, forced_result.result.?.owner);
+
+    const unacknowledged_result = try runRoutingExchange(&.{
+        .request = .{ .action = .take },
+        .initial_owner = false,
+        .activity = .idle,
+        .acknowledge = false,
+    });
+    try std.testing.expect(unacknowledged_result.result == null);
+    try std.testing.expect(std.mem.indexOf(u8, unacknowledged_result.failure.text(), "did not acknowledge") != null);
 }
 
 test "switching policy waits for safe playback edges and releases after idle" {

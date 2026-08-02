@@ -27,6 +27,10 @@ pub fn run(command: cli.Command, failure: *support.ErrorMessage) Error!Result {
 
     var control = controller.Controller{
         .session = try aacp.Session.initialize(fd, deadline_ms, initialization_delay_ms, failure),
+        .local_address = if (command.operation == .switching)
+            try bluez.localAddress(fd, failure)
+        else
+            null,
     };
     return control.run(command.operation, deadline_ms);
 }

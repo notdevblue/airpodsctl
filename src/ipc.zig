@@ -4,14 +4,17 @@ const cli = @import("cli");
 const command = @import("command");
 const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
+const smart_routing = @import("smart_routing");
 const support = @import("support");
 const transport = @import("transport");
 
 const c = support.c;
 const request_magic_v1 = "APC1";
 const request_magic_v2 = "APC2";
+const request_magic_v3 = "APC3";
 const response_magic_v1 = "APR1";
 const response_magic_v2 = "APR2";
+const response_magic_v3 = "APR3";
 const socket_suffix = "/airpodsctl.sock";
 const packet_size = 512;
 const request_timeout_ms = 3000;
@@ -21,6 +24,7 @@ pub const Error = error{ Unavailable, IpcFailure };
 pub const ProtocolVersion = enum {
     v1,
     v2,
+    v3,
 };
 
 pub const SocketPath = struct {
@@ -43,6 +47,7 @@ fn operationVersion(operation: command.Operation) ProtocolVersion {
     return switch (operation) {
         .noise_control, .battery => .v1,
         .automatic_ear_detection, .wear_status => .v2,
+        .switching => .v3,
     };
 }
 
@@ -50,6 +55,7 @@ fn requestMagic(version: ProtocolVersion) *const [4]u8 {
     return switch (version) {
         .v1 => request_magic_v1,
         .v2 => request_magic_v2,
+        .v3 => request_magic_v3,
     };
 }
 
@@ -57,6 +63,7 @@ fn responseMagic(version: ProtocolVersion) *const [4]u8 {
     return switch (version) {
         .v1 => response_magic_v1,
         .v2 => response_magic_v2,
+        .v3 => response_magic_v3,
     };
 }
 
@@ -64,6 +71,7 @@ fn decodeRequestVersion(packet: []const u8) ?ProtocolVersion {
     if (packet.len < 4) return null;
     if (std.mem.eql(u8, packet[0..4], request_magic_v1)) return .v1;
     if (std.mem.eql(u8, packet[0..4], request_magic_v2)) return .v2;
+    if (std.mem.eql(u8, packet[0..4], request_magic_v3)) return .v3;
     return null;
 }
 
@@ -71,6 +79,7 @@ fn decodeResponseVersion(packet: []const u8) ?ProtocolVersion {
     if (packet.len < 4) return null;
     if (std.mem.eql(u8, packet[0..4], response_magic_v1)) return .v1;
     if (std.mem.eql(u8, packet[0..4], response_magic_v2)) return .v2;
+    if (std.mem.eql(u8, packet[0..4], response_magic_v3)) return .v3;
     return null;
 }
 
@@ -167,6 +176,16 @@ pub fn encodeRequest(buffer: []u8, value: cli.Command) error{InvalidRequest}![]c
             buffer[payload] = 0;
             return buffer[0 .. payload + 1];
         },
+        .switching => |switching_request| {
+            buffer[4] = 5;
+            buffer[payload] = switch (switching_request.action) {
+                .status => 1,
+                .take => 2,
+                .release => 3,
+            };
+            buffer[payload + 1] = @intFromBool(switching_request.force);
+            return buffer[0 .. payload + 2];
+        },
     }
 }
 
@@ -235,6 +254,22 @@ pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
                 }
                 break :operation .wear_status;
             },
+            5 => operation: {
+                if (version != .v3 or packet.len != payload + 2 or packet[payload + 1] > 1) {
+                    return error.InvalidRequest;
+                }
+                const action: command.SwitchingAction = switch (packet[payload]) {
+                    1 => .status,
+                    2 => .take,
+                    3 => .release,
+                    else => return error.InvalidRequest,
+                };
+                if (packet[payload + 1] != 0 and action != .take) return error.InvalidRequest;
+                break :operation .{ .switching = .{
+                    .action = action,
+                    .force = packet[payload + 1] != 0,
+                } };
+            },
             else => return error.InvalidRequest,
         },
     };
@@ -272,6 +307,26 @@ pub fn encodeResultForVersion(buffer: []u8, result: command.Result, version: Pro
             buffer[7] = @intFromEnum(report.secondary);
             return buffer[0..8];
         },
+        .switching => |status| {
+            buffer[5] = 5;
+            buffer[6] = switch (status.hosts) {
+                .local_only => 1,
+                .local_and_remote => 2,
+                .unknown => 3,
+            };
+            buffer[7] = switch (status.owner) {
+                .linux => 1,
+                .remote => 2,
+                .none => 3,
+                .unknown => 4,
+            };
+            buffer[8] = switch (status.remote_activity) {
+                .idle => 1,
+                .active => 2,
+                .unknown => 3,
+            };
+            return buffer[0..9];
+        },
     }
 }
 
@@ -279,6 +334,7 @@ pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
     return encodeResultForVersion(buffer, result, switch (result) {
         .mode, .battery => .v1,
         .automatic_ear_detection, .wear_status => .v2,
+        .switching => .v3,
     });
 }
 
@@ -347,6 +403,27 @@ pub fn decodeResultForVersion(
         4 => if (version == .v2 and packet.len == 8) .{ .wear_status = .{
             .primary = @enumFromInt(packet[6]),
             .secondary = @enumFromInt(packet[7]),
+        } } else error.InvalidResponse,
+        5 => if (version == .v3 and packet.len == 9) .{ .switching = .{
+            .hosts = switch (packet[6]) {
+                1 => .local_only,
+                2 => .local_and_remote,
+                3 => .unknown,
+                else => return error.InvalidResponse,
+            },
+            .owner = switch (packet[7]) {
+                1 => .linux,
+                2 => .remote,
+                3 => .none,
+                4 => .unknown,
+                else => return error.InvalidResponse,
+            },
+            .remote_activity = switch (packet[8]) {
+                1 => .idle,
+                2 => .active,
+                3 => .unknown,
+                else => return error.InvalidResponse,
+            },
         } } else error.InvalidResponse,
         else => error.InvalidResponse,
     };

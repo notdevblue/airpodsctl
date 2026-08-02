@@ -105,7 +105,7 @@ const Server = struct {
                     },
                 }
             },
-            .listening_mode, .battery => {},
+            .listening_mode, .battery, .routing => {},
         }
     }
 
@@ -130,6 +130,7 @@ const Server = struct {
                     initialization_delay_ms,
                     &self.failure,
                 ),
+                .local_address = try bluez.localAddress(fd, &self.failure),
             },
         };
         self.ensureRoute();

@@ -395,6 +395,21 @@ pub fn close(fd: c_int) void {
     _ = c.close(fd);
 }
 
+pub fn localAddress(fd: c_int, failure: *support.ErrorMessage) Error![6]u8 {
+    var source: c.struct_sockaddr_l2 = std.mem.zeroes(c.struct_sockaddr_l2);
+    var size: c.socklen_t = @sizeOf(c.struct_sockaddr_l2);
+
+    if (c.getsockname(fd, .{ .__sockaddr__ = @ptrCast(&source) }, &size) != 0) {
+        failure.setSystem("cannot inspect the local Bluetooth address", support.lastErrno());
+        return error.TransportFailure;
+    }
+    if (size < @sizeOf(c.struct_sockaddr_l2) or source.l2_family != c.AF_BLUETOOTH) {
+        failure.set("Bluetooth returned an invalid local control address", .{});
+        return error.TransportFailure;
+    }
+    return source.l2_bdaddr.b;
+}
+
 // Open Apple's proprietary L2CAP channel without allowing connect to block the deadline.
 pub fn openControlChannel(
     address: Address,

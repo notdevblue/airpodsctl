@@ -50,6 +50,13 @@ fn writeWearLine(label: []const u8, state: ear_detection.WearState) void {
     writeAll(support.c.STDOUT_FILENO, "\n");
 }
 
+fn writeSwitchingLine(label: []const u8, value: []const u8) void {
+    writeAll(support.c.STDOUT_FILENO, label);
+    writeAll(support.c.STDOUT_FILENO, " ");
+    writeAll(support.c.STDOUT_FILENO, value);
+    writeAll(support.c.STDOUT_FILENO, "\n");
+}
+
 fn writeResult(result: operations.Result) void {
     switch (result) {
         .mode => |mode| {
@@ -73,6 +80,12 @@ fn writeResult(result: operations.Result) void {
         .wear_status => |report| {
             writeWearLine("primary", report.primary);
             writeWearLine("secondary", report.secondary);
+        },
+        .switching => |status| {
+            writeSwitchingLine("multipoint", status.multipointName());
+            writeSwitchingLine("hosts", status.hosts.name());
+            writeSwitchingLine("owner", status.owner.name());
+            writeSwitchingLine("remote-activity", status.remote_activity.name());
         },
     }
 }

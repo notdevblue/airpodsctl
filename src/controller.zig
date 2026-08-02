@@ -4,6 +4,7 @@ const command = @import("command");
 const control_command = @import("control_command");
 const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
+const smart_routing = @import("smart_routing");
 
 pub const Error = aacp.Error;
 
@@ -16,6 +17,10 @@ pub const State = struct {
     automatic_ear_detection_generation: u64 = 0,
     wear: ?ear_detection.WearReport = null,
     wear_generation: u64 = 0,
+    routing: smart_routing.State = .{},
+    routing_generation: u64 = 0,
+    connected_devices_generation: u64 = 0,
+    ownership_generation: u64 = 0,
 };
 
 pub const Event = union(enum) {
@@ -23,6 +28,7 @@ pub const Event = union(enum) {
     battery: battery.Report,
     automatic_ear_detection: ear_detection.Setting,
     wear: ear_detection.WearReport,
+    routing: smart_routing.Status,
 };
 
 fn ignoreEvent(_: ?*anyopaque, _: Event) void {}
@@ -38,6 +44,7 @@ pub const EventObserver = struct {
 
 pub const Controller = struct {
     session: aacp.Session,
+    local_address: ?smart_routing.Address = null,
     state: State = .{},
 
     pub fn receiveOne(self: *Controller) Error!?Event {
@@ -63,7 +70,34 @@ pub const Controller = struct {
                 self.state.automatic_ear_detection_generation +%= 1;
                 return .{ .automatic_ear_detection = setting };
             }
+            if (smart_routing.parseOwnership(control_state) catch {
+                self.session.channel.failure.set("AirPods returned an invalid routing-ownership response", .{});
+                return error.ProtocolFailure;
+            }) |owns| {
+                self.state.routing.updateOwnership(owns);
+                self.state.ownership_generation +%= 1;
+                self.state.routing_generation +%= 1;
+                return .{ .routing = self.state.routing.status() };
+            }
             return null;
+        }
+        if (smart_routing.parsePacket(packet) catch {
+            self.session.channel.failure.set("AirPods returned an invalid smart-routing response", .{});
+            return error.ProtocolFailure;
+        }) |routing_packet| {
+            switch (routing_packet) {
+                .audio_source => |source| if (self.local_address) |local| {
+                    self.state.routing.updateAudioSource(source, local);
+                },
+                .connected_devices => |devices| {
+                    if (self.local_address) |local| {
+                        self.state.routing.updateConnectedDevices(devices, local);
+                    }
+                    self.state.connected_devices_generation +%= 1;
+                },
+            }
+            self.state.routing_generation +%= 1;
+            return .{ .routing = self.state.routing.status() };
         }
         if (ear_detection.parseWearPacket(packet) catch {
             self.session.channel.failure.set("AirPods returned an invalid wear-state response", .{});
@@ -90,6 +124,72 @@ pub const Controller = struct {
 
     fn receiveObserved(self: *Controller, observer: EventObserver) Error!void {
         observer.notify(try self.receiveOne());
+    }
+
+    fn refreshRouting(self: *Controller, observer: EventObserver) Error!smart_routing.Status {
+        if (self.local_address == null) {
+            self.session.channel.failure.set("cannot determine the local Bluetooth address for switching", .{});
+            return error.ProtocolFailure;
+        }
+
+        const previous_generation = self.state.connected_devices_generation;
+        try smart_routing.requestStatus(&self.session);
+        while (self.state.connected_devices_generation == previous_generation) {
+            try self.receiveObserved(observer);
+        }
+        return self.state.routing.status();
+    }
+
+    fn runSwitching(
+        self: *Controller,
+        request: command.Switching,
+        observer: EventObserver,
+    ) Error!command.Result {
+        var status = try self.refreshRouting(observer);
+        switch (request.action) {
+            .status => return .{ .switching = status },
+            .take => {
+                if (status.hosts != .local_and_remote) {
+                    self.session.channel.failure.set(
+                        "AirPods multipoint is not ready; connect the iPhone and verify the BlueZ DeviceID setup",
+                        .{},
+                    );
+                    return error.ProtocolFailure;
+                }
+                if (status.owner == .linux) return .{ .switching = status };
+                if (!request.force and (status.owner == .unknown or status.remote_activity != .idle)) {
+                    self.session.channel.failure.set(
+                        "remote AirPods activity is not confirmed idle; use switching take --force to override it",
+                        .{},
+                    );
+                    return error.ProtocolFailure;
+                }
+            },
+            .release => {
+                if (status.owner == .remote or status.owner == .none) return .{ .switching = status };
+                if (status.owner == .unknown) {
+                    self.session.channel.failure.set("AirPods routing ownership is unknown", .{});
+                    return error.ProtocolFailure;
+                }
+            },
+        }
+
+        const target_owns = request.action == .take;
+        const previous_generation = self.state.ownership_generation;
+        try smart_routing.setOwnership(&self.session, target_owns);
+        while (self.state.ownership_generation == previous_generation or
+            self.state.routing.local_owns == null or self.state.routing.local_owns.? != target_owns)
+        {
+            self.receiveObserved(observer) catch |failure| {
+                self.session.channel.failure.set(
+                    "AirPods did not acknowledge switching ownership {s} before the timeout",
+                    .{if (target_owns) "take" else "release"},
+                );
+                return failure;
+            };
+        }
+        status = self.state.routing.status();
+        return .{ .switching = status };
     }
 
     pub fn runWithObserver(
@@ -183,6 +283,7 @@ pub const Controller = struct {
                 while (self.state.wear == null) try self.receiveObserved(observer);
                 break :result .{ .wear_status = self.state.wear.? };
             },
+            .switching => |request| try self.runSwitching(request, observer),
         };
     }
 

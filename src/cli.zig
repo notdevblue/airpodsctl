@@ -10,6 +10,8 @@ pub const usage =
     \\       airpodsctl [--device MAC] battery [COMPONENT]
     \\       airpodsctl [--device MAC] automatic-ear-detection status|on|off
     \\       airpodsctl [--device MAC] wear-status
+    \\       airpodsctl [--device MAC] switching status|release
+    \\       airpodsctl [--device MAC] switching take [--force]
     \\       airpodsctl [--device MAC] serve [--pause-on-removal=POLICY]
     \\
     \\Commands:
@@ -25,6 +27,8 @@ pub const usage =
     \\  automatic-ear-detection status|on|off
     \\                Read or change the AirPods device preference
     \\  wear-status   Print the latest primary and secondary wear state
+    \\  switching status|take|release
+    \\                Inspect or change multipoint audio ownership
     \\  serve         Keep an AACP session available to later commands
     \\
     \\Toggle modes:
@@ -42,6 +46,7 @@ pub const usage =
     \\      --direct      Bypass the session service
     \\      --pause-on-removal POLICY
     \\                    Pause MPRIS players while serving (default: off)
+    \\      --force       Allow switching take to interrupt remote activity
     \\  -h, --help        Show this help
     \\  -V, --version     Show the program version
     \\
@@ -85,6 +90,7 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     var positional_count: usize = 0;
     var requested_address: ?[]const u8 = null;
     var pause_on_removal: ?command.PauseOnRemoval = null;
+    var force = false;
     var backend: Backend = .automatic;
     var options_ended = false;
     var index: usize = 1;
@@ -130,6 +136,11 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
             backend = .direct;
             continue;
         }
+        if (!options_ended and std.mem.eql(u8, argument, "--force")) {
+            if (force) return .usage;
+            force = true;
+            continue;
+        }
         if (!options_ended and std.mem.startsWith(u8, argument, "--")) return .usage;
         if (!options_ended and argument.len > 1 and argument[0] == '-') {
             var short_index: usize = 1;
@@ -159,13 +170,35 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
 
     if (positional_count == 0) return .usage;
     if (std.mem.eql(u8, positional[0], "serve")) {
-        if (positional_count != 1 or backend != .automatic) return .usage;
+        if (positional_count != 1 or backend != .automatic or force) return .usage;
         return .{ .serve = .{
             .requested_address = requested_address,
             .pause_on_removal = pause_on_removal orelse .off,
         } };
     }
     if (pause_on_removal != null) return .usage;
+    if (std.mem.eql(u8, positional[0], "switching")) {
+        if (positional_count != 2) return .usage;
+        const action: command.SwitchingAction = if (std.mem.eql(u8, positional[1], "status"))
+            .status
+        else if (std.mem.eql(u8, positional[1], "take"))
+            .take
+        else if (std.mem.eql(u8, positional[1], "release"))
+            .release
+        else
+            return .usage;
+        if (force and action != .take) return .usage;
+        if (action != .status) {
+            if (backend == .direct) return .usage;
+            backend = .session;
+        }
+        return .{ .execute = .{
+            .requested_address = requested_address,
+            .backend = backend,
+            .operation = .{ .switching = .{ .action = action, .force = force } },
+        } };
+    }
+    if (force) return .usage;
     if (std.mem.eql(u8, positional[0], "battery")) {
         if (positional_count > 2) return .usage;
         return .{ .execute = .{

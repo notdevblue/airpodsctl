@@ -1,6 +1,7 @@
 const battery = @import("battery");
 const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
+const smart_routing = @import("smart_routing");
 
 pub const PauseOnRemoval = enum {
     off,
@@ -16,11 +17,23 @@ pub const NoiseControl = struct {
     toggle_mode_count: usize = 0,
 };
 
+pub const SwitchingAction = enum {
+    status,
+    take,
+    release,
+};
+
+pub const Switching = struct {
+    action: SwitchingAction,
+    force: bool = false,
+};
+
 pub const Operation = union(enum) {
     noise_control: NoiseControl,
     battery: ?battery.Component,
     automatic_ear_detection: ear_detection.Action,
     wear_status,
+    switching: Switching,
 };
 
 pub const BatteryResult = struct {
@@ -33,4 +46,5 @@ pub const Result = union(enum) {
     battery: BatteryResult,
     automatic_ear_detection: ear_detection.Setting,
     wear_status: ear_detection.WearReport,
+    switching: smart_routing.Status,
 };
