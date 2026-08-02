@@ -3,6 +3,7 @@ const app = @import("app");
 const battery = @import("battery");
 const build_options = @import("build_options");
 const cli = @import("cli");
+const ear_detection = @import("ear_detection");
 const ipc = @import("ipc");
 const operations = @import("command");
 const server = @import("server");
@@ -42,6 +43,13 @@ fn writeBatteryLine(component: battery.Component, reading: ?battery.Reading) voi
         std.fmt.bufPrint(&buffer, "{s} unavailable\n", .{component.name()}) catch return);
 }
 
+fn writeWearLine(label: []const u8, state: ear_detection.WearState) void {
+    writeAll(support.c.STDOUT_FILENO, label);
+    writeAll(support.c.STDOUT_FILENO, " ");
+    writeAll(support.c.STDOUT_FILENO, state.name());
+    writeAll(support.c.STDOUT_FILENO, "\n");
+}
+
 fn writeResult(result: operations.Result) void {
     switch (result) {
         .mode => |mode| {
@@ -57,6 +65,14 @@ fn writeResult(result: operations.Result) void {
         } else {
             writeBatteryLine(.left, value.report.left);
             writeBatteryLine(.right, value.report.right);
+        },
+        .automatic_ear_detection => |setting| {
+            writeAll(support.c.STDOUT_FILENO, setting.name());
+            writeAll(support.c.STDOUT_FILENO, "\n");
+        },
+        .wear_status => |report| {
+            writeWearLine("primary", report.primary);
+            writeWearLine("secondary", report.secondary);
         },
     }
 }

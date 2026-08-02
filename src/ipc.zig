@@ -2,18 +2,26 @@ const std = @import("std");
 const battery = @import("battery");
 const cli = @import("cli");
 const command = @import("command");
+const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
 const support = @import("support");
 const transport = @import("transport");
 
 const c = support.c;
-const request_magic = "APC1";
-const response_magic = "APR1";
+const request_magic_v1 = "APC1";
+const request_magic_v2 = "APC2";
+const response_magic_v1 = "APR1";
+const response_magic_v2 = "APR2";
 const socket_suffix = "/airpodsctl.sock";
 const packet_size = 512;
 const request_timeout_ms = 3000;
 
 pub const Error = error{ Unavailable, IpcFailure };
+
+pub const ProtocolVersion = enum {
+    v1,
+    v2,
+};
 
 pub const SocketPath = struct {
     buffer: [108]u8 = undefined,
@@ -28,7 +36,43 @@ pub const Request = struct {
     // The address slice borrows the received packet and is consumed before that buffer is reused.
     requested_address: ?[]const u8,
     operation: command.Operation,
+    version: ProtocolVersion,
 };
+
+fn operationVersion(operation: command.Operation) ProtocolVersion {
+    return switch (operation) {
+        .noise_control, .battery => .v1,
+        .automatic_ear_detection, .wear_status => .v2,
+    };
+}
+
+fn requestMagic(version: ProtocolVersion) *const [4]u8 {
+    return switch (version) {
+        .v1 => request_magic_v1,
+        .v2 => request_magic_v2,
+    };
+}
+
+fn responseMagic(version: ProtocolVersion) *const [4]u8 {
+    return switch (version) {
+        .v1 => response_magic_v1,
+        .v2 => response_magic_v2,
+    };
+}
+
+fn decodeRequestVersion(packet: []const u8) ?ProtocolVersion {
+    if (packet.len < 4) return null;
+    if (std.mem.eql(u8, packet[0..4], request_magic_v1)) return .v1;
+    if (std.mem.eql(u8, packet[0..4], request_magic_v2)) return .v2;
+    return null;
+}
+
+fn decodeResponseVersion(packet: []const u8) ?ProtocolVersion {
+    if (packet.len < 4) return null;
+    if (std.mem.eql(u8, packet[0..4], response_magic_v1)) return .v1;
+    if (std.mem.eql(u8, packet[0..4], response_magic_v2)) return .v2;
+    return null;
+}
 
 fn decodeMode(value: u8) ?noise_control.Mode {
     return switch (value) {
@@ -76,7 +120,8 @@ pub fn encodeRequest(buffer: []u8, value: cli.Command) error{InvalidRequest}![]c
         if (address.len != 17) return error.InvalidRequest;
     }
 
-    @memcpy(buffer[0..request_magic.len], request_magic);
+    const version = operationVersion(value.operation);
+    @memcpy(buffer[0..4], requestMagic(version));
     buffer[5] = if (value.requested_address) |address| @intCast(address.len) else 0;
     if (value.requested_address) |address| @memcpy(buffer[6 .. 6 + address.len], address);
     const payload = 6 + buffer[5];
@@ -108,13 +153,26 @@ pub fn encodeRequest(buffer: []u8, value: cli.Command) error{InvalidRequest}![]c
             buffer[payload] = if (component) |selected| @intFromEnum(selected) else 0;
             return buffer[0 .. payload + 1];
         },
+        .automatic_ear_detection => |action| {
+            buffer[4] = 3;
+            buffer[payload] = switch (action) {
+                .status => 1,
+                .on => 2,
+                .off => 3,
+            };
+            return buffer[0 .. payload + 1];
+        },
+        .wear_status => {
+            buffer[4] = 4;
+            buffer[payload] = 0;
+            return buffer[0 .. payload + 1];
+        },
     }
 }
 
 pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
-    if (packet.len < 7 or !std.mem.eql(u8, packet[0..request_magic.len], request_magic)) {
-        return error.InvalidRequest;
-    }
+    if (packet.len < 7) return error.InvalidRequest;
+    const version = decodeRequestVersion(packet) orelse return error.InvalidRequest;
     const address_len = packet[5];
     if (address_len != 0 and address_len != 17) return error.InvalidRequest;
     const payload = 6 + @as(usize, address_len);
@@ -122,6 +180,7 @@ pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
 
     return .{
         .requested_address = if (address_len == 0) null else packet[6..payload],
+        .version = version,
         .operation = switch (packet[4]) {
             1 => operation: {
                 if (packet.len < payload + 2) return error.InvalidRequest;
@@ -161,14 +220,29 @@ pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
                     else => return error.InvalidRequest,
                 } };
             },
+            3 => operation: {
+                if (version != .v2 or packet.len != payload + 1) return error.InvalidRequest;
+                break :operation .{ .automatic_ear_detection = switch (packet[payload]) {
+                    1 => .status,
+                    2 => .on,
+                    3 => .off,
+                    else => return error.InvalidRequest,
+                } };
+            },
+            4 => operation: {
+                if (version != .v2 or packet.len != payload + 1 or packet[payload] != 0) {
+                    return error.InvalidRequest;
+                }
+                break :operation .wear_status;
+            },
             else => return error.InvalidRequest,
         },
     };
 }
 
 // Responses carry either a typed result or a bounded diagnostic from the service.
-pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
-    @memcpy(buffer[0..response_magic.len], response_magic);
+pub fn encodeResultForVersion(buffer: []u8, result: command.Result, version: ProtocolVersion) []const u8 {
+    @memcpy(buffer[0..4], responseMagic(version));
     buffer[4] = 0;
 
     switch (result) {
@@ -187,25 +261,56 @@ pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
             @memset(buffer[13..16], 0);
             return buffer[0..16];
         },
+        .automatic_ear_detection => |setting| {
+            buffer[5] = 3;
+            buffer[6] = @intFromEnum(setting);
+            return buffer[0..7];
+        },
+        .wear_status => |report| {
+            buffer[5] = 4;
+            buffer[6] = @intFromEnum(report.primary);
+            buffer[7] = @intFromEnum(report.secondary);
+            return buffer[0..8];
+        },
     }
 }
 
-pub fn encodeFailure(buffer: []u8, message: []const u8) []const u8 {
+pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
+    return encodeResultForVersion(buffer, result, switch (result) {
+        .mode, .battery => .v1,
+        .automatic_ear_detection, .wear_status => .v2,
+    });
+}
+
+pub fn encodeFailureForVersion(buffer: []u8, message: []const u8, version: ProtocolVersion) []const u8 {
     const length = @min(message.len, buffer.len - 7);
 
-    @memcpy(buffer[0..response_magic.len], response_magic);
+    @memcpy(buffer[0..4], responseMagic(version));
     buffer[4] = 1;
     std.mem.writeInt(u16, buffer[5..7], @intCast(length), .little);
     @memcpy(buffer[7 .. 7 + length], message[0..length]);
     return buffer[0 .. 7 + length];
 }
 
-pub fn decodeResult(
+pub fn encodeFailure(buffer: []u8, message: []const u8) []const u8 {
+    return encodeFailureForVersion(buffer, message, .v1);
+}
+
+pub fn decodeResultForVersion(
     packet: []const u8,
+    expected_version: ?ProtocolVersion,
     failure: *support.ErrorMessage,
-) error{ InvalidResponse, RemoteFailure }!command.Result {
-    if (packet.len < 7 or !std.mem.eql(u8, packet[0..response_magic.len], response_magic)) {
-        return error.InvalidResponse;
+) error{ InvalidResponse, RemoteFailure, IncompatibleVersion }!command.Result {
+    if (packet.len < 7) return error.InvalidResponse;
+    const version = decodeResponseVersion(packet) orelse return error.InvalidResponse;
+    if (expected_version) |expected| {
+        if (version != expected) {
+            failure.set(
+                "running session service uses IPC {s}; restart it to use IPC {s} commands",
+                .{ @tagName(version), @tagName(expected) },
+            );
+            return error.IncompatibleVersion;
+        }
     }
     if (packet[4] == 1) {
         const length = std.mem.readInt(u16, packet[5..7], .little);
@@ -232,8 +337,26 @@ pub fn decodeResult(
                 .right = try decodeReading(packet[10..13]),
             },
         } } else error.InvalidResponse,
+        3 => if (version == .v2 and packet.len == 7) .{
+            .automatic_ear_detection = switch (packet[6]) {
+                @intFromEnum(ear_detection.Setting.on) => .on,
+                @intFromEnum(ear_detection.Setting.off) => .off,
+                else => return error.InvalidResponse,
+            },
+        } else error.InvalidResponse,
+        4 => if (version == .v2 and packet.len == 8) .{ .wear_status = .{
+            .primary = @enumFromInt(packet[6]),
+            .secondary = @enumFromInt(packet[7]),
+        } } else error.InvalidResponse,
         else => error.InvalidResponse,
     };
+}
+
+pub fn decodeResult(
+    packet: []const u8,
+    failure: *support.ErrorMessage,
+) error{ InvalidResponse, RemoteFailure, IncompatibleVersion }!command.Result {
+    return decodeResultForVersion(packet, null, failure);
 }
 
 pub fn getSocketPath(failure: *support.ErrorMessage) Error!SocketPath {
@@ -459,11 +582,12 @@ pub fn request(value: cli.Command, failure: *support.ErrorMessage) Error!command
     }
 
     var packet: [packet_size]u8 = undefined;
+    const version = operationVersion(value.operation);
     try sendPacket(fd, encodeRequest(&packet, value) catch {
         failure.set("invalid Bluetooth address: {s}", .{value.requested_address.?});
         return error.IpcFailure;
     }, deadline_ms, failure);
-    return decodeResult(try receivePacket(fd, &packet, deadline_ms, failure), failure) catch {
+    return decodeResultForVersion(try receivePacket(fd, &packet, deadline_ms, failure), version, failure) catch {
         if (failure.text().len == 0) failure.set("session service returned an invalid response", .{});
         return error.IpcFailure;
     };

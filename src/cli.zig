@@ -1,13 +1,16 @@
 const std = @import("std");
 const battery = @import("battery");
 const command = @import("command");
+const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
 
 pub const usage =
     \\Usage: airpodsctl [--device MAC] COMMAND
     \\       airpodsctl [--device MAC] toggle [MODE...]
     \\       airpodsctl [--device MAC] battery [COMPONENT]
-    \\       airpodsctl [--device MAC] serve
+    \\       airpodsctl [--device MAC] automatic-ear-detection status|on|off
+    \\       airpodsctl [--device MAC] wear-status
+    \\       airpodsctl [--device MAC] serve [--pause-on-removal=POLICY]
     \\
     \\Commands:
     \\  status        Print the current listening mode
@@ -19,6 +22,9 @@ pub const usage =
     \\                Cycle through MODEs in order (defaults to anc off)
     \\  battery [COMPONENT]
     \\                Print all battery readings or one percentage
+    \\  automatic-ear-detection status|on|off
+    \\                Read or change the AirPods device preference
+    \\  wear-status   Print the latest primary and secondary wear state
     \\  serve         Keep an AACP session available to later commands
     \\
     \\Toggle modes:
@@ -27,10 +33,15 @@ pub const usage =
     \\Battery components:
     \\  left, right
     \\
+    \\Pause policies:
+    \\  one, both, off
+    \\
     \\Options:
     \\  -d, --device MAC  Select connected AirPods by Bluetooth address
     \\      --session     Require a running session service
     \\      --direct      Bypass the session service
+    \\      --pause-on-removal POLICY
+    \\                    Pause MPRIS players while serving (default: off)
     \\  -h, --help        Show this help
     \\  -V, --version     Show the program version
     \\
@@ -50,6 +61,7 @@ pub const Command = struct {
 
 pub const ServeCommand = struct {
     requested_address: ?[]const u8,
+    pause_on_removal: command.PauseOnRemoval,
 };
 
 pub const Invocation = union(enum) {
@@ -60,11 +72,19 @@ pub const Invocation = union(enum) {
     execute: Command,
 };
 
+fn parsePauseOnRemoval(value: []const u8) ?command.PauseOnRemoval {
+    if (std.mem.eql(u8, value, "off")) return .off;
+    if (std.mem.eql(u8, value, "one")) return .one;
+    if (std.mem.eql(u8, value, "both")) return .both;
+    return null;
+}
+
 pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     // Keep an overflow slot so a fifth toggle mode is rejected by mode-count validation.
     var positional: [command.max_toggle_modes + 2][]const u8 = undefined;
     var positional_count: usize = 0;
     var requested_address: ?[]const u8 = null;
+    var pause_on_removal: ?command.PauseOnRemoval = null;
     var backend: Backend = .automatic;
     var options_ended = false;
     var index: usize = 1;
@@ -86,6 +106,18 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         }
         if (!options_ended and std.mem.startsWith(u8, argument, "--device=")) {
             requested_address = argument["--device=".len..];
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--pause-on-removal")) {
+            if (pause_on_removal != null) return .usage;
+            index += 1;
+            if (index == arguments.len) return .usage;
+            pause_on_removal = parsePauseOnRemoval(arguments[index]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.startsWith(u8, argument, "--pause-on-removal=")) {
+            if (pause_on_removal != null) return .usage;
+            pause_on_removal = parsePauseOnRemoval(argument["--pause-on-removal=".len..]) orelse return .usage;
             continue;
         }
         if (!options_ended and std.mem.eql(u8, argument, "--session")) {
@@ -128,8 +160,12 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     if (positional_count == 0) return .usage;
     if (std.mem.eql(u8, positional[0], "serve")) {
         if (positional_count != 1 or backend != .automatic) return .usage;
-        return .{ .serve = .{ .requested_address = requested_address } };
+        return .{ .serve = .{
+            .requested_address = requested_address,
+            .pause_on_removal = pause_on_removal orelse .off,
+        } };
     }
+    if (pause_on_removal != null) return .usage;
     if (std.mem.eql(u8, positional[0], "battery")) {
         if (positional_count > 2) return .usage;
         return .{ .execute = .{
@@ -139,6 +175,23 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
                 battery.Component.parse(positional[1]) orelse return .usage
             else
                 null },
+        } };
+    }
+    if (std.mem.eql(u8, positional[0], "automatic-ear-detection")) {
+        if (positional_count != 2) return .usage;
+        return .{ .execute = .{
+            .requested_address = requested_address,
+            .backend = backend,
+            .operation = .{ .automatic_ear_detection = ear_detection.Action.parse(positional[1]) orelse
+                return .usage },
+        } };
+    }
+    if (std.mem.eql(u8, positional[0], "wear-status")) {
+        if (positional_count != 1) return .usage;
+        return .{ .execute = .{
+            .requested_address = requested_address,
+            .backend = backend,
+            .operation = .wear_status,
         } };
     }
 

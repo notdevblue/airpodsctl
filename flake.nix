@@ -25,11 +25,13 @@
             src = self;
 
             nativeBuildInputs = [
+              pkgs.dbus
               pkgs.pkg-config
               pkgs.zig_0_16
             ];
             buildInputs = [
               pkgs.bluez
+              pkgs.pipewire
               pkgs.systemd
             ];
 
@@ -44,7 +46,10 @@
             checkPhase = ''
               runHook preCheck
               ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache" \
-                zig build check -Doptimize=ReleaseSafe -Dversion=0.5.0
+                zig build check \
+                  -Ddbus-session-config=${pkgs.dbus}/share/dbus-1/session.conf \
+                  -Doptimize=ReleaseSafe \
+                  -Dversion=0.5.0
               runHook postCheck
             '';
             installPhase = ''
@@ -83,7 +88,9 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.bluez
+              pkgs.dbus
               pkgs.pkg-config
+              pkgs.pipewire
               pkgs.systemd
               pkgs.zig_0_16
             ];

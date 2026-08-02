@@ -45,3 +45,23 @@ pub const ErrorMessage = struct {
 pub fn lastErrno() c_int {
     return c.__errno_location().*;
 }
+
+fn writeAll(fd: c_int, bytes: []const u8) void {
+    var remaining = bytes;
+    while (remaining.len != 0) {
+        const written = c.write(fd, remaining.ptr, remaining.len);
+        if (written > 0) {
+            remaining = remaining[@intCast(written)..];
+        } else if (written < 0 and lastErrno() == c.EINTR) {
+            continue;
+        } else {
+            return;
+        }
+    }
+}
+
+pub fn warn(message: []const u8) void {
+    writeAll(c.STDERR_FILENO, "airpodsctl: warning: ");
+    writeAll(c.STDERR_FILENO, message);
+    writeAll(c.STDERR_FILENO, "\n");
+}

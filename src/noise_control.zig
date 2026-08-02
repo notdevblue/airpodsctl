@@ -1,7 +1,8 @@
 const std = @import("std");
 const aacp = @import("aacp");
+const control_command = @import("control_command");
 
-const listening_mode_prefix = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0d };
+const listening_mode_identifier = 0x0d;
 
 pub const Error = aacp.Error;
 
@@ -50,18 +51,21 @@ pub const Action = enum {
     }
 };
 
-// Distinguish unrelated AACP traffic from malformed listening-mode notifications.
-pub fn parsePacket(packet: []const u8) error{InvalidModePacket}!?Mode {
-    if (packet.len < 4 or !std.mem.eql(u8, packet[0..4], listening_mode_prefix[0..4])) return null;
-    if (packet.len < 5) return error.InvalidModePacket;
-    if (packet[4] != listening_mode_prefix[4]) return null;
-    if (packet.len < listening_mode_prefix.len) return error.InvalidModePacket;
-    if (packet[5] != listening_mode_prefix[5] or packet[6] != listening_mode_prefix[6]) return null;
-    if (packet.len < listening_mode_prefix.len + 1) return error.InvalidModePacket;
-    if (packet[7] < @intFromEnum(Mode.off) or packet[7] > @intFromEnum(Mode.adaptive)) {
+pub fn parseCommand(state: control_command.State) error{InvalidModePacket}!?Mode {
+    if (state.identifier != listening_mode_identifier) return null;
+    if (!std.mem.allEqual(u8, state.values[1..], 0) or
+        state.values[0] < @intFromEnum(Mode.off) or
+        state.values[0] > @intFromEnum(Mode.adaptive))
+    {
         return error.InvalidModePacket;
     }
-    return @enumFromInt(packet[7]);
+
+    return @enumFromInt(state.values[0]);
+}
+
+// Retain the feature-level parser for packet fixtures while sharing the generic frame codec.
+pub fn parsePacket(packet: []const u8) (error{ InvalidControlCommand, InvalidModePacket })!?Mode {
+    return parseCommand((try control_command.parsePacket(packet)) orelse return null);
 }
 
 pub fn targetMode(action: Action, current_mode: Mode, custom_modes: []const Mode) Mode {
@@ -83,9 +87,6 @@ pub fn targetMode(action: Action, current_mode: Mode, custom_modes: []const Mode
 }
 
 pub fn setMode(session: *aacp.Session, mode: Mode) Error!void {
-    const packet = [_]u8{
-        0x04,               0x00, 0x04, 0x00, 0x09, 0x00, 0x0d,
-        @intFromEnum(mode), 0x00, 0x00, 0x00,
-    };
+    const packet = control_command.encode(listening_mode_identifier, &.{@intFromEnum(mode)}) catch unreachable;
     try session.send(&packet);
 }
