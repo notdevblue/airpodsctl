@@ -9,7 +9,9 @@ const ipc = @import("ipc");
 const noise_control = @import("noise_control");
 const operations = @import("command");
 const pipewire_route = @import("pipewire_route");
+const smart_routing = @import("smart_routing");
 const support = @import("support");
+const switching_policy = @import("switching_policy");
 const transport = @import("transport");
 const wear_policy = @import("wear_policy");
 
@@ -681,6 +683,131 @@ test "automatic ear detection setting and wear packets are typed" {
     unrelated_wear = wear_packet;
     unrelated_wear[4] = 0x04;
     try std.testing.expect((try ear_detection.parseWearPacket(&unrelated_wear)) == null);
+}
+
+test "smart-routing packets are exact and bounded" {
+    const local = smart_routing.Address{ 1, 2, 3, 4, 5, 6 };
+    const remote = smart_routing.Address{ 7, 8, 9, 10, 11, 12 };
+    const audio_idle = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x0e, 0x00,
+        7,    8,    9,    10,   11,   12,   0,
+    };
+    const connected = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x2e, 0x00, 0xaa, 0xbb, 2,
+        1,    2,    3,    4,    5,    6,    0x10, 0x20,
+        7,    8,    9,    10,   11,   12,   0x30, 0x40,
+    };
+
+    const source = (try smart_routing.parsePacket(&audio_idle)).?.audio_source;
+    try std.testing.expectEqualSlices(u8, &remote, &source.address);
+    try std.testing.expectEqual(smart_routing.AudioSourceState.idle, source.state);
+    const devices = (try smart_routing.parsePacket(&connected)).?.connected_devices;
+    try std.testing.expectEqual(@as(usize, 2), devices.count);
+    try std.testing.expectEqualSlices(u8, &local, &devices.addresses[0]);
+    try std.testing.expectEqualSlices(u8, &remote, &devices.addresses[1]);
+
+    for (4..audio_idle.len) |length| {
+        try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(audio_idle[0..length]));
+    }
+    for (4..connected.len) |length| {
+        try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(connected[0..length]));
+    }
+    const oversized_audio = audio_idle ++ [_]u8{0};
+    try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(&oversized_audio));
+    var too_many_hosts = connected;
+    too_many_hosts[8] = 3;
+    try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(&too_many_hosts));
+    try std.testing.expect((try smart_routing.parsePacket(&.{ 0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0, 0 })) == null);
+}
+
+test "smart-routing state fails closed" {
+    const local = smart_routing.Address{ 1, 2, 3, 4, 5, 6 };
+    var devices = smart_routing.ConnectedDevices{
+        .metadata = .{ 0, 0 },
+        .count = 2,
+    };
+    devices.addresses[0] = local;
+    devices.addresses[1] = .{ 7, 8, 9, 10, 11, 12 };
+    var state = smart_routing.State{};
+
+    state.updateConnectedDevices(devices, local);
+    try std.testing.expectEqual(smart_routing.Hosts.local_and_remote, state.hosts);
+    try std.testing.expectEqualStrings("unverified", state.status().multipointName());
+    state.updateOwnership(false);
+    state.updateAudioSource(.{ .address = devices.addresses[1], .state = .idle }, local);
+    try std.testing.expectEqual(smart_routing.Owner.remote, state.status().owner);
+    try std.testing.expectEqual(smart_routing.RemoteActivity.idle, state.status().remote_activity);
+    try std.testing.expectEqualStrings("ready", state.status().multipointName());
+
+    state.updateAudioSource(.{ .address = devices.addresses[1], .state = .in_call }, local);
+    try std.testing.expectEqual(smart_routing.RemoteActivity.active, state.status().remote_activity);
+    state.updateAudioSource(.{ .address = devices.addresses[1], .state = @enumFromInt(0xff) }, local);
+    try std.testing.expectEqual(smart_routing.RemoteActivity.unknown, state.status().remote_activity);
+    state.reset();
+    try std.testing.expectEqual(smart_routing.Owner.unknown, state.status().owner);
+}
+
+test "ownership control state is strict" {
+    const owned = control_command.State{ .identifier = 0x06, .values = .{ 1, 0, 0, 0 } };
+    try std.testing.expect((try smart_routing.parseOwnership(owned)).?);
+    var released = owned;
+    released.values[0] = 0;
+    try std.testing.expect(!(try smart_routing.parseOwnership(released)).?);
+    var unrelated = owned;
+    unrelated.identifier = 0x0d;
+    try std.testing.expect((try smart_routing.parseOwnership(unrelated)) == null);
+    var invalid = owned;
+    invalid.values[1] = 1;
+    try std.testing.expectError(error.InvalidOwnershipPacket, smart_routing.parseOwnership(invalid));
+    invalid = owned;
+    invalid.values[0] = 2;
+    try std.testing.expectError(error.InvalidOwnershipPacket, smart_routing.parseOwnership(invalid));
+}
+
+test "switching policy waits for safe playback edges and releases after idle" {
+    const eligible = switching_policy.Eligibility{
+        .route_selected = true,
+        .multipoint_ready = true,
+        .remote_idle = true,
+    };
+    var policy = switching_policy.Policy{ .mode = .mpris };
+
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(0, true, true, eligible));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(1, false, false, eligible));
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(2, true, true, eligible));
+    policy.takeSucceeded(3);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(4, false, false, eligible));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.tick(30_003));
+    try std.testing.expectEqual(switching_policy.Action.release, policy.tick(30_004));
+    policy.releaseSucceeded();
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(30_005, true, true, eligible));
+}
+
+test "switching policy suppresses unsafe and contested takeovers" {
+    const blocked = switching_policy.Eligibility{
+        .route_selected = true,
+        .multipoint_ready = true,
+        .remote_idle = false,
+    };
+    const eligible = switching_policy.Eligibility{
+        .route_selected = true,
+        .multipoint_ready = true,
+        .remote_idle = true,
+    };
+    var policy = switching_policy.Policy{ .mode = .mpris };
+
+    _ = policy.updatePlayback(0, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(1, true, true, blocked));
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(2, true, true, eligible));
+    policy.operationFailed();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(3, true, true, eligible));
+    _ = policy.updatePlayback(4, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(5, true, true, eligible));
+    policy.takeSucceeded(6);
+    policy.remoteTakeover();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(7, true, true, eligible));
+    _ = policy.updatePlayback(8, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(9, true, true, eligible));
 }
 
 test "automatic ear detection exchanges require a newer matching acknowledgement" {
