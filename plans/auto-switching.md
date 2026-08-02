@@ -11,6 +11,10 @@ The first release proceeds in two stages:
 1. Status and explicit take/release commands.
 2. Opt-in, MPRIS-triggered automatic switching after the protocol and safety matrix pass.
 
+## Implementation status
+
+The parser, controller state, manual commands, IPC v3, MPRIS policy, default-sink guard, reconnect behavior, and automated tests are implemented. Hardware capture and acceptance remain incomplete, so the commands are experimental, automation stays off by default, and a public release must retain the validation gate below.
+
 ## Public interface and behavior
 
 Add:
