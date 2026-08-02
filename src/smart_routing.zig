@@ -94,8 +94,12 @@ pub const Status = struct {
     remote_activity: RemoteActivity,
 
     pub fn multipointName(self: Status) []const u8 {
-        return if (self.hosts == .local_and_remote and self.owner != .unknown and
-            self.remote_activity != .unknown) "ready" else "unverified";
+        return if (self.isReady()) "ready" else "unverified";
+    }
+
+    pub fn isReady(self: Status) bool {
+        return self.hosts == .local_and_remote and self.owner != .unknown and
+            self.remote_activity != .unknown;
     }
 };
 

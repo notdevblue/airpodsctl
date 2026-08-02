@@ -3,6 +3,7 @@ const battery = @import("battery");
 const command = @import("command");
 const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
+const switching_policy = @import("switching_policy");
 
 pub const usage =
     \\Usage: airpodsctl [--device MAC] COMMAND
@@ -12,7 +13,7 @@ pub const usage =
     \\       airpodsctl [--device MAC] wear-status
     \\       airpodsctl [--device MAC] switching status|release
     \\       airpodsctl [--device MAC] switching take [--force]
-    \\       airpodsctl [--device MAC] serve [--pause-on-removal=POLICY]
+    \\       airpodsctl [--device MAC] serve [--pause-on-removal=POLICY] [--auto-switch=MODE]
     \\
     \\Commands:
     \\  status        Print the current listening mode
@@ -40,6 +41,9 @@ pub const usage =
     \\Pause policies:
     \\  one, both, off
     \\
+    \\Auto-switch modes:
+    \\  mpris, off
+    \\
     \\Options:
     \\  -d, --device MAC  Select connected AirPods by Bluetooth address
     \\      --session     Require a running session service
@@ -47,6 +51,8 @@ pub const usage =
     \\      --pause-on-removal POLICY
     \\                    Pause MPRIS players while serving (default: off)
     \\      --force       Allow switching take to interrupt remote activity
+    \\      --auto-switch MODE
+    \\                    Take on safe MPRIS play edges while serving (default: off)
     \\  -h, --help        Show this help
     \\  -V, --version     Show the program version
     \\
@@ -67,6 +73,7 @@ pub const Command = struct {
 pub const ServeCommand = struct {
     requested_address: ?[]const u8,
     pause_on_removal: command.PauseOnRemoval,
+    auto_switch: switching_policy.Mode,
 };
 
 pub const Invocation = union(enum) {
@@ -84,12 +91,19 @@ fn parsePauseOnRemoval(value: []const u8) ?command.PauseOnRemoval {
     return null;
 }
 
+fn parseAutoSwitch(value: []const u8) ?switching_policy.Mode {
+    if (std.mem.eql(u8, value, "off")) return .off;
+    if (std.mem.eql(u8, value, "mpris")) return .mpris;
+    return null;
+}
+
 pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     // Keep an overflow slot so a fifth toggle mode is rejected by mode-count validation.
     var positional: [command.max_toggle_modes + 2][]const u8 = undefined;
     var positional_count: usize = 0;
     var requested_address: ?[]const u8 = null;
     var pause_on_removal: ?command.PauseOnRemoval = null;
+    var auto_switch: ?switching_policy.Mode = null;
     var force = false;
     var backend: Backend = .automatic;
     var options_ended = false;
@@ -124,6 +138,18 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         if (!options_ended and std.mem.startsWith(u8, argument, "--pause-on-removal=")) {
             if (pause_on_removal != null) return .usage;
             pause_on_removal = parsePauseOnRemoval(argument["--pause-on-removal=".len..]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--auto-switch")) {
+            if (auto_switch != null) return .usage;
+            index += 1;
+            if (index == arguments.len) return .usage;
+            auto_switch = parseAutoSwitch(arguments[index]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.startsWith(u8, argument, "--auto-switch=")) {
+            if (auto_switch != null) return .usage;
+            auto_switch = parseAutoSwitch(argument["--auto-switch=".len..]) orelse return .usage;
             continue;
         }
         if (!options_ended and std.mem.eql(u8, argument, "--session")) {
@@ -174,9 +200,10 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         return .{ .serve = .{
             .requested_address = requested_address,
             .pause_on_removal = pause_on_removal orelse .off,
+            .auto_switch = auto_switch orelse .off,
         } };
     }
-    if (pause_on_removal != null) return .usage;
+    if (pause_on_removal != null or auto_switch != null) return .usage;
     if (std.mem.eql(u8, positional[0], "switching")) {
         if (positional_count != 2) return .usage;
         const action: command.SwitchingAction = if (std.mem.eql(u8, positional[1], "status"))

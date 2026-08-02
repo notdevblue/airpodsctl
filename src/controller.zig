@@ -192,6 +192,11 @@ pub const Controller = struct {
         return .{ .switching = status };
     }
 
+    pub fn requestRoutingStatus(self: *Controller, deadline_ms: i64) Error!void {
+        self.session.channel.deadline_ms = deadline_ms;
+        try smart_routing.requestStatus(&self.session);
+    }
+
     pub fn runWithObserver(
         self: *Controller,
         operation: command.Operation,

@@ -7,6 +7,7 @@ const ipc = @import("ipc");
 const media = @import("media");
 const pipewire_route = @import("pipewire_route");
 const support = @import("support");
+const switching_policy = @import("switching_policy");
 const transport = @import("transport");
 const wear_policy = @import("wear_policy");
 
@@ -14,6 +15,7 @@ const c = support.c;
 const operation_timeout_ms = 3000;
 const initialization_delay_ms = 150;
 const idle_poll_ms = 1000;
+const max_reconnect_delay_ms = 30_000;
 
 pub const Error = error{ServerFailure};
 
@@ -32,18 +34,27 @@ const Connection = struct {
 
 const Server = struct {
     requested_address: ?[]const u8,
-    policy: wear_policy.Policy,
+    wear: wear_policy.Policy,
+    switching: switching_policy.Policy,
     connection: ?Connection = null,
     players: media.Controller = .{},
+    media_retry_at_ms: i64 = 0,
     route: ?pipewire_route.Monitor = null,
     route_retry_at_ms: i64 = 0,
+    reconnect_at_ms: i64 = 0,
+    reconnect_delay_ms: i64 = idle_poll_ms,
     failure: support.ErrorMessage = .{},
 
     fn disconnect(self: *Server) void {
         if (self.connection) |connection| bluez.close(connection.fd);
         self.connection = null;
-        self.policy.reset();
+        self.wear.reset();
+        self.switching.remoteTakeover();
         self.players.clear();
+        if (self.switching.mode == .mpris) {
+            self.reconnect_at_ms = transport.nowMs() + self.reconnect_delay_ms;
+            self.reconnect_delay_ms = @min(self.reconnect_delay_ms * 2, max_reconnect_delay_ms);
+        }
     }
 
     fn warnMedia(_: *Server, message: []const u8) void {
@@ -58,7 +69,8 @@ const Server = struct {
     }
 
     fn ensureRoute(self: *Server) void {
-        if (self.policy.mode == .off or self.route != null or self.connection == null or
+        if ((self.wear.mode == .off and self.switching.mode == .off) or
+            self.route != null or self.connection == null or
             transport.nowMs() < self.route_retry_at_ms)
         {
             return;
@@ -75,17 +87,30 @@ const Server = struct {
         return if (self.route) |*route| route.state() == .selected else false;
     }
 
+    fn switchingEligibility(self: *const Server) switching_policy.Eligibility {
+        const status = if (self.connection) |connection|
+            connection.control.state.routing.status()
+        else
+            return .{ .route_selected = false, .multipoint_ready = false, .remote_idle = false };
+
+        return .{
+            .route_selected = self.selectedRoute(),
+            .multipoint_ready = status.isReady(),
+            .remote_idle = status.remote_activity == .idle,
+        };
+    }
+
     fn handleControllerEvent(self: *Server, event: controller.Event) void {
         switch (event) {
             .automatic_ear_detection => |setting| {
-                self.policy.updateSetting(
+                self.wear.updateSetting(
                     setting,
                     if (self.connection) |*connection| connection.control.state.wear else null,
                 );
                 if (setting == .off) self.players.clear();
             },
             .wear => |report| {
-                switch (self.policy.updateWear(report, self.players.hasOwnership())) {
+                switch (self.wear.updateWear(report, self.players.hasOwnership())) {
                     .none => {},
                     .pause_media => {
                         if (!self.selectedRoute()) return;
@@ -105,7 +130,12 @@ const Server = struct {
                     },
                 }
             },
-            .listening_mode, .battery, .routing => {},
+            .routing => |status| {
+                if (self.switching.service_owns and status.owner != .linux) {
+                    self.switching.remoteTakeover();
+                }
+            },
+            .listening_mode, .battery => {},
         }
     }
 
@@ -120,20 +150,96 @@ const Server = struct {
         const fd = try bluez.openControlChannel(address, deadline_ms, &self.failure);
         errdefer bluez.close(fd);
 
+        var control = controller.Controller{
+            .session = try aacp.Session.initialize(
+                fd,
+                deadline_ms,
+                initialization_delay_ms,
+                &self.failure,
+            ),
+            .local_address = try bluez.localAddress(fd, &self.failure),
+        };
+        if (self.switching.mode == .mpris) try control.requestRoutingStatus(deadline_ms);
+
         self.connection = .{
             .fd = fd,
             .address = address,
-            .control = .{
-                .session = try aacp.Session.initialize(
-                    fd,
-                    deadline_ms,
-                    initialization_delay_ms,
-                    &self.failure,
-                ),
-                .local_address = try bluez.localAddress(fd, &self.failure),
-            },
+            .control = control,
         };
+        self.reconnect_at_ms = 0;
+        self.reconnect_delay_ms = idle_poll_ms;
         self.ensureRoute();
+    }
+
+    fn ensureConnection(self: *Server) void {
+        if (self.connection != null or self.switching.mode != .mpris or
+            transport.nowMs() < self.reconnect_at_ms)
+        {
+            return;
+        }
+        self.connect() catch {
+            self.reconnect_at_ms = transport.nowMs() + self.reconnect_delay_ms;
+            self.reconnect_delay_ms = @min(self.reconnect_delay_ms * 2, max_reconnect_delay_ms);
+            self.failure.len = 0;
+        };
+    }
+
+    fn performSwitching(self: *Server, action: switching_policy.Action) void {
+        if (action == .none) return;
+        const deadline_ms = transport.nowMs() + operation_timeout_ms;
+        const connection = if (self.connection) |*value| value else {
+            self.switching.operationFailed();
+            return;
+        };
+        _ = connection.control.runWithObserver(.{ .switching = .{
+            .action = if (action == .take) .take else .release,
+        } }, deadline_ms, .{
+            .context = self,
+            .callback = observeControllerEvent,
+        }) catch {
+            self.switching.operationFailed();
+            self.warnMedia("automatic AirPods switching failed");
+            self.failure.len = 0;
+            self.disconnect();
+            return;
+        };
+
+        if (action == .take) {
+            self.switching.takeSucceeded(transport.nowMs());
+        } else {
+            self.switching.releaseSucceeded();
+        }
+    }
+
+    fn handlePlayback(self: *Server, update: media.PlaybackUpdate) void {
+        self.performSwitching(self.switching.updatePlayback(
+            transport.nowMs(),
+            update.playing,
+            update.play_edge,
+            self.switchingEligibility(),
+        ));
+    }
+
+    fn ensurePlayback(self: *Server) void {
+        if ((self.switching.mode == .off and !self.switching.service_owns) or
+            transport.nowMs() < self.media_retry_at_ms)
+        {
+            return;
+        }
+
+        self.handlePlayback(self.players.monitorPlayback() catch {
+            self.media_retry_at_ms = transport.nowMs() + idle_poll_ms;
+            if (self.switching.service_owns) {
+                _ = self.switching.updatePlayback(
+                    transport.nowMs(),
+                    false,
+                    false,
+                    .{ .route_selected = false, .multipoint_ready = false, .remote_idle = false },
+                );
+            }
+            return;
+        });
+        self.media_retry_at_ms = 0;
     }
 
     fn replyFailure(
@@ -182,18 +288,24 @@ const Server = struct {
             }
         }
 
+        const result = self.connection.?.control.runWithObserver(request.operation, deadline_ms, .{
+            .context = self,
+            .callback = observeControllerEvent,
+        }) catch {
+            self.replyFailure(client, deadline_ms, request.version);
+
+            // A protocol failure leaves the stream and cached state unreliable; reconnect on demand.
+            self.disconnect();
+            return;
+        };
+        if (request.operation == .switching) switch (request.operation.switching.action) {
+            .status => {},
+            .take => self.switching.takeSucceeded(transport.nowMs()),
+            .release => self.switching.releaseSucceeded(),
+        };
         ipc.sendPacket(client, ipc.encodeResultForVersion(
             &packet,
-            self.connection.?.control.runWithObserver(request.operation, deadline_ms, .{
-                .context = self,
-                .callback = observeControllerEvent,
-            }) catch {
-                self.replyFailure(client, deadline_ms, request.version);
-
-                // A protocol failure leaves the stream and cached state unreliable; reconnect on demand.
-                self.disconnect();
-                return;
-            },
+            result,
             request.version,
         ), deadline_ms, &self.failure) catch {};
     }
@@ -202,10 +314,15 @@ const Server = struct {
         // Connect eagerly for fast first use, but remain available while the AirPods are absent.
         self.connect() catch {
             self.failure.len = 0;
+            if (self.switching.mode == .mpris) {
+                self.reconnect_at_ms = transport.nowMs() + self.reconnect_delay_ms;
+            }
         };
 
         while ((@as(*volatile c.sig_atomic_t, &stop_requested)).* == 0) {
+            self.ensureConnection();
             self.ensureRoute();
+            self.ensurePlayback();
             var descriptors = [_]c.struct_pollfd{
                 .{ .fd = listener, .events = c.POLLIN, .revents = 0 },
                 .{
@@ -242,7 +359,11 @@ const Server = struct {
                 self.disconnect();
             }
             if (descriptors[2].revents != 0) {
-                self.players.dispatch() catch self.warnMedia("lost the user D-Bus media connection");
+                self.players.dispatch() catch {
+                    self.warnMedia("lost the user D-Bus media connection");
+                    self.media_retry_at_ms = transport.nowMs() + idle_poll_ms;
+                };
+                self.ensurePlayback();
             }
             if (descriptors[3].revents & c.POLLIN != 0) {
                 if (self.route) |*route| route.dispatch() catch {
@@ -258,6 +379,7 @@ const Server = struct {
                 defer _ = c.close(client);
                 self.handleClient(client);
             }
+            self.performSwitching(self.switching.tick(transport.nowMs()));
         }
     }
 };
@@ -274,7 +396,8 @@ pub fn run(configuration: cli.ServeCommand, failure: *support.ErrorMessage) Erro
 
     var service = Server{
         .requested_address = configuration.requested_address,
-        .policy = .{ .mode = configuration.pause_on_removal },
+        .wear = .{ .mode = configuration.pause_on_removal },
+        .switching = .{ .mode = configuration.auto_switch },
     };
     defer {
         service.disconnect();

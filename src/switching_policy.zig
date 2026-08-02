@@ -42,6 +42,11 @@ pub const Policy = struct {
         if (!self.initialized) {
             self.initialized = true;
             self.playing = playing;
+            if (playing) {
+                self.release_at_ms = null;
+            } else if (self.service_owns and self.release_at_ms == null) {
+                self.armRelease(now_ms);
+            }
             return .none;
         }
 

@@ -359,7 +359,7 @@ fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
 
 fn sendOwnership(fd: c_int, owns: bool) bool {
     const packet = [_]u8{
-        0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
+        0x04,               0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
         @intFromBool(owns), 0x00, 0x00, 0x00,
     };
     return c.send(fd, &packet, packet.len, 0) == packet.len;
@@ -369,13 +369,14 @@ fn sendRoutingSnapshot(fd: c_int, exchange: *const RoutingExchange) bool {
     const audio_source_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x0d, 0x00 };
     const connected_devices_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x2d, 0x00 };
     const audio_source = [_]u8{
-        0x04, 0x00, 0x04, 0x00, 0x0e, 0x00,
-        7, 8, 9, 10, 11, 12, @intFromEnum(exchange.activity),
+        0x04,                            0x00, 0x04, 0x00, 0x0e, 0x00,
+        7,                               8,    9,    10,   11,   12,
+        @intFromEnum(exchange.activity),
     };
     const connected_devices = [_]u8{
         0x04, 0x00, 0x04, 0x00, 0x2e, 0x00, 0, 0, 2,
-        1, 2, 3, 4, 5, 6, 0, 0,
-        7, 8, 9, 10, 11, 12, 0, 0,
+        1,    2,    3,    4,    5,    6,    0, 0, 7,
+        8,    9,    10,   11,   12,   0,    0,
     };
 
     return receiveExpected(fd, &audio_source_request) and
@@ -397,7 +398,7 @@ fn emulateRoutingExchange(fd: c_int, exchange: *const RoutingExchange) u8 {
 
     const target_owns = exchange.request.action == .take;
     const ownership_command = [_]u8{
-        0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
+        0x04,                      0x00, 0x04, 0x00, 0x09, 0x00, 0x06,
         @intFromBool(target_owns), 0x00, 0x00, 0x00,
     };
     if (!receiveExpected(fd, &ownership_command)) return 2;
@@ -546,6 +547,18 @@ test "session command parsing" {
     try std.testing.expectEqual(cli.Backend.direct, direct.execute.backend);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "--direct", "status" }) == .usage);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "serve" }) == .usage);
+}
+
+test "serve auto-switch parsing is opt in" {
+    const disabled = cli.parseInvocation(&.{ "airpodsctl", "serve" });
+    const enabled = cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=mpris" });
+
+    try std.testing.expect(disabled == .serve);
+    try std.testing.expectEqual(switching_policy.Mode.off, disabled.serve.auto_switch);
+    try std.testing.expectEqual(switching_policy.Mode.mpris, enabled.serve.auto_switch);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=invalid" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=mpris", "--auto-switch=off" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "status", "--auto-switch=mpris" }) == .usage);
 }
 
 test "switching commands require the service for mutations" {
@@ -834,12 +847,13 @@ test "smart-routing packets are exact and bounded" {
     const remote = smart_routing.Address{ 7, 8, 9, 10, 11, 12 };
     const audio_idle = [_]u8{
         0x04, 0x00, 0x04, 0x00, 0x0e, 0x00,
-        7,    8,    9,    10,   11,   12,   0,
+        7,    8,    9,    10,   11,   12,
+        0,
     };
     const connected = [_]u8{
         0x04, 0x00, 0x04, 0x00, 0x2e, 0x00, 0xaa, 0xbb, 2,
-        1,    2,    3,    4,    5,    6,    0x10, 0x20,
-        7,    8,    9,    10,   11,   12,   0x30, 0x40,
+        1,    2,    3,    4,    5,    6,    0x10, 0x20, 7,
+        8,    9,    10,   11,   12,   0x30, 0x40,
     };
 
     const source = (try smart_routing.parsePacket(&audio_idle)).?.audio_source;
@@ -1000,6 +1014,22 @@ test "switching policy suppresses unsafe and contested takeovers" {
     try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(7, true, true, eligible));
     _ = policy.updatePlayback(8, false, false, eligible);
     try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(9, true, true, eligible));
+}
+
+test "manual switching ownership adopts the first playback baseline" {
+    const blocked = switching_policy.Eligibility{
+        .route_selected = false,
+        .multipoint_ready = false,
+        .remote_idle = false,
+    };
+    var policy = switching_policy.Policy{ .mode = .off };
+
+    policy.takeSucceeded(0);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(1, true, false, blocked));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.tick(30_001));
+    _ = policy.updatePlayback(30_002, false, false, blocked);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.tick(60_001));
+    try std.testing.expectEqual(switching_policy.Action.release, policy.tick(60_002));
 }
 
 test "automatic ear detection exchanges require a newer matching acknowledgement" {

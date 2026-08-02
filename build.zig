@@ -108,6 +108,7 @@ pub fn build(builder: *std.Build) void {
     cli_module.addImport("command", command_module);
     cli_module.addImport("ear_detection", ear_detection_module);
     cli_module.addImport("noise_control", noise_control_module);
+    cli_module.addImport("switching_policy", switching_policy_module);
 
     const bluez_module = builder.createModule(.{
         .root_source_file = builder.path("src/bluez.zig"),
@@ -186,6 +187,7 @@ pub fn build(builder: *std.Build) void {
     server_module.addImport("media", media_module);
     server_module.addImport("pipewire_route", pipewire_route_module);
     server_module.addImport("support", support_module);
+    server_module.addImport("switching_policy", switching_policy_module);
     server_module.addImport("transport", transport_module);
     server_module.addImport("wear_policy", wear_policy_module);
 
@@ -296,6 +298,9 @@ pub fn build(builder: *std.Build) void {
         &.{ "status", "--pause-on-removal=one" },
         &.{ "serve", "--pause-on-removal=invalid" },
         &.{ "serve", "--pause-on-removal=one", "--pause-on-removal=both" },
+        &.{ "serve", "--auto-switch=invalid" },
+        &.{ "serve", "--auto-switch=mpris", "--auto-switch=off" },
+        &.{ "status", "--auto-switch=mpris" },
         &.{ "--session", "--direct", "status" },
         &.{ "--session", "serve" },
         &.{ "--direct", "serve" },

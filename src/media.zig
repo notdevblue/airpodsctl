@@ -20,6 +20,11 @@ const player_interface = "org.mpris.MediaPlayer2.Player";
 
 pub const Error = error{Unavailable};
 
+pub const PlaybackUpdate = struct {
+    playing: bool,
+    play_edge: bool,
+};
+
 const PlaybackStatus = enum {
     playing,
     paused,
@@ -53,6 +58,12 @@ pub const Controller = struct {
     owner_slot: ?*c.sd_bus_slot = null,
     owners: [max_players]Owner = undefined,
     owner_count: usize = 0,
+    playback_initialized: bool = false,
+    playing: bool = false,
+    refresh_pending: bool = false,
+    play_edge_pending: bool = false,
+    pending_new_service: [max_name]u8 = undefined,
+    pending_new_service_len: usize = 0,
 
     fn removeOwnedAt(self: *Controller, index: usize) void {
         self.owners[index] = self.owners[self.owner_count - 1];
@@ -94,6 +105,7 @@ pub const Controller = struct {
             var property: [*c]const u8 = null;
             if (c.sd_bus_message_read(message, "s", &property) < 0) return 0;
             if (property != null and std.mem.eql(u8, std.mem.span(property), "PlaybackStatus")) {
+                self.refresh_pending = true;
                 if (c.sd_bus_message_enter_container(message, c.SD_BUS_TYPE_VARIANT, "s") < 0) {
                     self.clearMessageSender(message);
                     return 0;
@@ -103,7 +115,12 @@ pub const Controller = struct {
                     self.clearMessageSender(message);
                     return 0;
                 }
-                if (status == null or parsePlaybackStatus(std.mem.span(status)) != .paused) {
+                const playback_status = if (status == null)
+                    PlaybackStatus.invalid
+                else
+                    parsePlaybackStatus(std.mem.span(status));
+                if (playback_status == .playing) self.play_edge_pending = true;
+                if (playback_status != .paused) {
                     self.clearMessageSender(message);
                 }
                 if (c.sd_bus_message_exit_container(message) < 0) return 0;
@@ -123,6 +140,7 @@ pub const Controller = struct {
             if (read <= 0) break;
             if (invalidated != null and std.mem.eql(u8, std.mem.span(invalidated), "PlaybackStatus")) {
                 self.clearMessageSender(message);
+                self.refresh_pending = true;
             }
         }
         return 0;
@@ -141,6 +159,14 @@ pub const Controller = struct {
             service == null or previous == null or current == null)
         {
             return 0;
+        }
+
+        const service_name = std.mem.span(service);
+        if (std.mem.startsWith(u8, service_name, player_prefix)) {
+            self.refresh_pending = true;
+            if (std.mem.span(current).len != 0) {
+                self.pending_new_service_len = copyName(&self.pending_new_service, service_name) orelse 0;
+            }
         }
 
         var index: usize = 0;
@@ -163,6 +189,11 @@ pub const Controller = struct {
         self.owner_slot = c.sd_bus_slot_unref(self.owner_slot);
         self.bus = c.sd_bus_unref(self.bus);
         self.owner_count = 0;
+        self.playback_initialized = false;
+        self.playing = false;
+        self.refresh_pending = false;
+        self.play_edge_pending = false;
+        self.pending_new_service_len = 0;
     }
 
     fn connect(self: *Controller) Error!void {
@@ -278,6 +309,61 @@ pub const Controller = struct {
         self.owner_count += 1;
     }
 
+    fn refreshPlayback(self: *Controller) Error!void {
+        const deadline_ms = transport.nowMs() + operation_timeout_ms;
+        var bus_error: c.sd_bus_error = std.mem.zeroes(c.sd_bus_error);
+        var reply: ?*c.sd_bus_message = null;
+        defer c.sd_bus_error_free(&bus_error);
+        defer _ = c.sd_bus_message_unref(reply);
+        if (c.sd_bus_call_method(
+            self.bus,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "ListNames",
+            &bus_error,
+            &reply,
+            "",
+        ) < 0 or c.sd_bus_message_enter_container(reply, c.SD_BUS_TYPE_ARRAY, "s") < 0) {
+            return error.Unavailable;
+        }
+
+        var playing = false;
+        var inspected: usize = 0;
+        while (inspected < max_players and withinDeadline(deadline_ms)) {
+            var service_pointer: [*c]const u8 = null;
+            const read = c.sd_bus_message_read(reply, "s", &service_pointer);
+            if (read <= 0) break;
+            if (service_pointer == null) continue;
+            const service = std.mem.span(service_pointer);
+            if (!std.mem.startsWith(u8, service, player_prefix) or service.len > max_name) continue;
+
+            const status = self.getPlaybackStatus(@ptrCast(service_pointer));
+            inspected += 1;
+            if (status == .playing) {
+                playing = true;
+                if (self.pending_new_service_len != 0 and std.mem.eql(
+                    u8,
+                    self.pending_new_service[0..self.pending_new_service_len],
+                    service,
+                )) self.play_edge_pending = true;
+            }
+        }
+        self.playing = playing;
+        self.playback_initialized = true;
+        self.refresh_pending = false;
+        self.pending_new_service_len = 0;
+    }
+
+    fn currentPlaybackUpdate(self: *Controller) PlaybackUpdate {
+        const update = PlaybackUpdate{
+            .playing = self.playing,
+            .play_edge = self.playing and self.play_edge_pending,
+        };
+        self.play_edge_pending = false;
+        return update;
+    }
+
     pub fn deinit(self: *Controller) void {
         self.disconnect();
     }
@@ -308,6 +394,12 @@ pub const Controller = struct {
             }
             if (result == 0) return;
         }
+    }
+
+    pub fn monitorPlayback(self: *Controller) Error!PlaybackUpdate {
+        try self.connect();
+        if (!self.playback_initialized or self.refresh_pending) try self.refreshPlayback();
+        return self.currentPlaybackUpdate();
     }
 
     pub fn pausePlayers(self: *Controller) Error!void {
@@ -345,6 +437,7 @@ pub const Controller = struct {
                 self.recordOwner(service, service_z);
             }
         }
+        self.refresh_pending = true;
     }
 
     pub fn resumePlayers(self: *Controller) Error!void {
@@ -368,5 +461,6 @@ pub const Controller = struct {
             if (eligible) _ = self.callPlayer(service_z, "Play");
         }
         self.owner_count = 0;
+        self.refresh_pending = true;
     }
 };
