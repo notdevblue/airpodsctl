@@ -1,6 +1,6 @@
 # Automatic ear detection and wear-aware media control
 
-Status: proposed and not yet part of the supported command surface.
+Status: implemented provisionally. The command surface, packet codecs, controller state/events, wear policy, PipeWire route gate, and MPRIS integration are present, but the hardware and desktop acceptance matrix below remains outstanding.
 
 This document separates two features that are often both called automatic ear detection:
 

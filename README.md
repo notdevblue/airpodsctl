@@ -1,6 +1,6 @@
 # airpodsctl
 
-`airpodsctl` is a small Linux command-line utility for reading settings and state from connected AirPods and changing supported settings. Commands are one-shot by default, while an optional foreground session service can retain the AACP Bluetooth connection for faster subsequent operations. There is no tray application, BLE proximity scanner, media integration, or network listener.
+`airpodsctl` is a small Linux command-line utility for reading settings and state from connected AirPods and changing supported settings. Commands are one-shot by default, while an optional foreground session service can retain the AACP Bluetooth connection for faster subsequent operations. The service can also provide opt-in, wear-aware MPRIS media control. There is no tray application, BLE proximity scanner, audio-profile automation, or network listener.
 
 The utility is currently tested with AirPods Pro 2 with USB-C. Other AirPods models that expose the same AACP listening-mode and battery-report protocols may work, but Apple does not publish these protocols and firmware updates can change them.
 
@@ -28,6 +28,13 @@ left 99 charging
 right 100 discharging
 $ airpodsctl battery left
 99
+$ airpodsctl automatic-ear-detection status
+on
+$ airpodsctl automatic-ear-detection off
+off
+$ airpodsctl wear-status
+primary in-ear
+secondary out-of-ear
 ```
 
 Commands automatically use a running session service when one is available. Start it in a dedicated terminal to avoid repeating Bluetooth discovery and AACP initialization:
@@ -61,7 +68,13 @@ The available commands are:
 - `toggle [MODE...]`: cycle through the supplied modes in order, wrapping from the last mode to the first. If the current mode is not listed, the first supplied mode is selected. Supported mode arguments are `anc`, `off`, `transparency`, and `adaptive`, and each may be listed once. With one mode, `toggle` always selects it; with no modes, it retains the default ANC/Off cycle.
 - `battery`: print the left and right earbud battery levels and charging states. An earbud that is not present in the report is printed as `unavailable`.
 - `battery left|right`: print only the selected earbud's battery percentage. The command waits for a report containing that earbud and fails if the AirPods do not provide one before the overall deadline.
-- `serve`: run the persistent foreground session service. `--device MAC` selects which AirPods the service owns.
+- `automatic-ear-detection status|on|off`: read or change the AirPods' Automatic Ear Detection preference. Changes succeed only after a newer matching device notification; a successful Bluetooth write alone is not treated as confirmation.
+- `wear-status`: print the most recent primary and secondary AACP wear states. These labels describe protocol roles, not permanent left/right identity. A state is `in-ear`, `out-of-ear`, `in-case`, or `unknown`.
+- `serve`: run the persistent foreground session service. `--device MAC` selects which AirPods the service owns. Add `--pause-on-removal=one` or `--pause-on-removal=both` to enable wear-aware MPRIS control; the default is `off`.
+
+Automatic Ear Detection and wear notifications are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/automatic-ear-detection.md). Commands therefore remain provisional and fail if the AirPods do not provide a confirmed setting or wear snapshot.
+
+Wear-aware media control requires PipeWire/WirePlumber. It acts only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink. Unknown routing, virtual default sinks, another output, a PipeWire restart, or a disabled/unknown Automatic Ear Detection setting suppresses all media actions. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
 
 Case battery reporting is deprecated and `battery case` is invalid usage. AACP reports the case as `0 disconnected` when it cannot relay a case reading, so presenting that record as a percentage is misleading. Accurate case state requires Apple BLE proximity advertisements, which are deliberately outside the current program scope. The requirements for reconsidering that feature are recorded in [plans/ble-advertisments.md](plans/ble-advertisments.md).
 
@@ -84,11 +97,21 @@ $ systemctl --user enable --now airpodsctl.service
 
 The unit runs `airpodsctl serve` in the foreground and restarts it after unexpected process failures. A temporary AirPods disconnection does not terminate the service: it keeps the local socket available and reconnects when a later command needs the device.
 
+The installed unit keeps media automation disabled. Enable it with a user override that replaces `ExecStart`, for example:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/env airpodsctl serve --pause-on-removal=one
+```
+
+Run `systemctl --user daemon-reload` and restart the unit after changing the override.
+
 AirPods Pro 2 may reject the Off command until **Off Listening Mode** has been enabled once from a compatible iPhone, iPad, or Mac. Turning listening modes off also disables the AirPods' hearing-protection processing.
 
 ## Build
 
-The build requires Zig 0.16, `pkg-config`, BlueZ development files, and `libsystemd` development files:
+The build requires Zig 0.16, `pkg-config`, BlueZ, PipeWire, `libsystemd`, and `dbus-run-session` for the isolated MPRIS test:
 
 ```console
 $ zig build check
@@ -106,13 +129,13 @@ $ nix run . -- status
 
 ## Design and security
 
-The utility asks BlueZ for already-connected AirPods over the system D-Bus, then opens Apple's AACP L2CAP PSM `0x1001`. A shared session layer performs the handshake and notification subscription; independent feature modules then parse or send only the packets they own. A central controller is the sole AACP reader and routes every notification into connection-scoped state, preventing one feature from consuming another feature's events. Adding a setting does not require changing device discovery or packet transport.
+The utility asks BlueZ for already-connected AirPods over the system D-Bus, then opens Apple's AACP L2CAP PSM `0x1001`. A shared session layer performs the handshake and notification subscription; independent feature modules then parse or send only the packets they own. A central controller is the sole AACP reader and routes every notification into connection-scoped state and typed events, preventing one feature from consuming another feature's events. Generic control-command framing is shared by listening mode and Automatic Ear Detection.
 
-Persistent clients communicate through a versioned `SOCK_SEQPACKET` Unix socket at `$XDG_RUNTIME_DIR/airpodsctl.sock`. The socket is created with mode `0600`, accepted peers must have the service's user ID, messages are bounded, and clients can request only typed operations implemented by the program—not arbitrary AACP packets. The service safely replaces an owner-matched stale socket but never removes an unexpected file at that path. It does not expose a network listener.
+Persistent clients communicate through a versioned `SOCK_SEQPACKET` Unix socket at `$XDG_RUNTIME_DIR/airpodsctl.sock`. Version 1 remains in use for listening-mode and battery operations; version 2 adds Automatic Ear Detection and wear status. The socket is created with mode `0600`, accepted peers must have the service's user ID, messages are bounded, and clients can request only typed operations implemented by the program—not arbitrary AACP packets. The service safely replaces an owner-matched stale socket but never removes an unexpected file at that path. It does not expose a network listener.
 
 The utility does not pair devices, initiate a normal Bluetooth connection, scan for BLE proximity advertisements, run with elevated privileges, or write AirPods configuration except when an explicit setting command requests a change. Case battery will not be inferred from AACP placeholder records.
 
-Each invocation has a three-second overall deadline. A mode-changing command is successful only when the AirPods send a listening-mode notification containing the requested mode.
+Each invocation has a three-second overall deadline. A mode or Automatic Ear Detection change is successful only when the AirPods send a newer notification containing the requested value. Media discovery is bounded to 16 MPRIS services, and individual D-Bus calls have fixed deadlines so an unresponsive player does not invalidate the AirPods connection.
 
 Protocol behavior was independently implemented from observed AACP traffic and cross-checked against the reverse-engineering work in [LibrePods](https://github.com/kavishdevar/librepods) and [MagicPodsCore](https://github.com/steam3d/MagicPodsCore).
 
