@@ -158,7 +158,6 @@ pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
                     0 => null,
                     @intFromEnum(battery.Component.left) => .left,
                     @intFromEnum(battery.Component.right) => .right,
-                    @intFromEnum(battery.Component.case) => .case,
                     else => return error.InvalidRequest,
                 } };
             },
@@ -183,7 +182,9 @@ pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
             buffer[6] = if (value.component) |component| @intFromEnum(component) else 0;
             encodeReading(buffer[7..10], value.report.left);
             encodeReading(buffer[10..13], value.report.right);
-            encodeReading(buffer[13..16], value.report.case);
+
+            // Retain the retired case slot so v1 clients and already-running services remain compatible.
+            @memset(buffer[13..16], 0);
             return buffer[0..16];
         },
     }
@@ -224,13 +225,11 @@ pub fn decodeResult(
                 0 => null,
                 @intFromEnum(battery.Component.left) => .left,
                 @intFromEnum(battery.Component.right) => .right,
-                @intFromEnum(battery.Component.case) => .case,
                 else => return error.InvalidResponse,
             },
             .report = .{
                 .left = try decodeReading(packet[7..10]),
                 .right = try decodeReading(packet[10..13]),
-                .case = try decodeReading(packet[13..16]),
             },
         } } else error.InvalidResponse,
         else => error.InvalidResponse,

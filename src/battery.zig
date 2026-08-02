@@ -7,7 +7,6 @@ const record_size = 5;
 pub const Component = enum(u8) {
     right = 0x02,
     left = 0x04,
-    case = 0x08,
 
     pub fn name(self: Component) []const u8 {
         return @tagName(self);
@@ -16,7 +15,6 @@ pub const Component = enum(u8) {
     pub fn parse(value: []const u8) ?Component {
         if (std.mem.eql(u8, value, "left")) return .left;
         if (std.mem.eql(u8, value, "right")) return .right;
-        if (std.mem.eql(u8, value, "case")) return .case;
         return null;
     }
 };
@@ -40,13 +38,11 @@ pub const Reading = struct {
 pub const Report = struct {
     left: ?Reading = null,
     right: ?Reading = null,
-    case: ?Reading = null,
 
     pub fn get(self: Report, component: Component) ?Reading {
         return switch (component) {
             .left => self.left,
             .right => self.right,
-            .case => self.case,
         };
     }
 };
@@ -90,10 +86,6 @@ pub fn parsePacket(packet: []const u8) error{InvalidBatteryPacket}!?Report {
             @intFromEnum(Component.right) => {
                 if (report.right != null) return error.InvalidBatteryPacket;
                 report.right = reading;
-            },
-            @intFromEnum(Component.case) => {
-                if (report.case != null) return error.InvalidBatteryPacket;
-                report.case = reading;
             },
             else => {},
         }

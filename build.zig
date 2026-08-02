@@ -174,6 +174,7 @@ pub fn build(builder: *std.Build) void {
         &.{ "toggle", "invalid" },
         &.{ "toggle", "anc", "anc" },
         &.{ "battery", "invalid" },
+        &.{ "battery", "case" },
         &.{ "battery", "left", "right" },
         &.{ "--session", "--direct", "status" },
         &.{ "--session", "serve" },

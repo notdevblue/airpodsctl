@@ -325,20 +325,21 @@ test "invalid noise-control responses fail with a message" {
 test "battery component parsing" {
     try std.testing.expectEqual(battery.Component.left, battery.Component.parse("left").?);
     try std.testing.expectEqual(battery.Component.right, battery.Component.parse("right").?);
-    try std.testing.expectEqual(battery.Component.case, battery.Component.parse("case").?);
+    try std.testing.expect(battery.Component.parse("case") == null);
     try std.testing.expect(battery.Component.parse("invalid") == null);
     try std.testing.expectEqualStrings("left", battery.Component.left.name());
 }
 
 test "battery command parsing" {
     const aggregate = cli.parseInvocation(&.{ "airpodsctl", "battery" });
-    const selected = cli.parseInvocation(&.{ "airpodsctl", "battery", "case" });
+    const selected = cli.parseInvocation(&.{ "airpodsctl", "battery", "right" });
 
     try std.testing.expect(aggregate == .execute);
     try std.testing.expect(aggregate.execute.operation == .battery);
     try std.testing.expect(aggregate.execute.operation.battery == null);
     try std.testing.expect(selected == .execute);
-    try std.testing.expectEqual(battery.Component.case, selected.execute.operation.battery.?);
+    try std.testing.expectEqual(battery.Component.right, selected.execute.operation.battery.?);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "battery", "case" }) == .usage);
 }
 
 test "session command parsing" {
@@ -371,12 +372,16 @@ test "IPC request and response encoding" {
     try std.testing.expectEqual(noise_control.Mode.adaptive, decoded_request.operation.noise_control.toggle_modes[1]);
 
     var failure = support.ErrorMessage{};
-    const decoded_result = try ipc.decodeResult(ipc.encodeResult(&packet, .{ .battery = .{
-        .component = .case,
-        .report = .{ .case = .{ .level = 17, .state = .discharging } },
-    } }), &failure);
-    try std.testing.expectEqual(@as(u8, 17), decoded_result.battery.report.case.?.level);
-    try std.testing.expectEqual(battery.State.discharging, decoded_result.battery.report.case.?.state);
+    _ = ipc.encodeResult(&packet, .{ .battery = .{
+        .component = .right,
+        .report = .{ .right = .{ .level = 38, .state = .discharging } },
+    } });
+
+    // A previous v1 service may populate the retired case slot; new clients must ignore it.
+    @memcpy(packet[13..16], &[_]u8{ 1, 17, 2 });
+    const decoded_result = try ipc.decodeResult(packet[0..16], &failure);
+    try std.testing.expectEqual(@as(u8, 38), decoded_result.battery.report.right.?.level);
+    try std.testing.expectEqual(battery.State.discharging, decoded_result.battery.report.right.?.state);
 
     try std.testing.expectError(
         error.RemoteFailure,
@@ -415,8 +420,12 @@ test "IPC packet transport preserves and bounds messages" {
     try std.testing.expectEqualStrings("session socket message was too large", failure.text());
 }
 
-test "battery packet parsing" {
+test "earbud battery packet parsing" {
     const unrelated = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0d, 0x02 };
+    const case_only = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x01,
+        0x08, 0x01, 17,   0x02, 0x01,
+    };
 
     try std.testing.expect(try battery.parsePacket(&unrelated) == null);
     const report = (try battery.parsePacket(&battery_report_packet)).?;
@@ -424,8 +433,9 @@ test "battery packet parsing" {
     try std.testing.expectEqual(battery.State.charging, report.left.?.state);
     try std.testing.expectEqual(@as(u8, 100), report.right.?.level);
     try std.testing.expectEqual(battery.State.discharging, report.right.?.state);
-    try std.testing.expectEqual(@as(u8, 17), report.case.?.level);
-    try std.testing.expectEqual(battery.State.discharging, report.case.?.state);
+    const ignored_case = (try battery.parsePacket(&case_only)).?;
+    try std.testing.expect(ignored_case.left == null);
+    try std.testing.expect(ignored_case.right == null);
 }
 
 test "malformed battery packets are rejected" {
@@ -481,8 +491,8 @@ test "one initialized controller serves sequential cached operations" {
         (try control.run(.{ .noise_control = .{ .action = .anc } }, deadline_ms)).mode,
     );
     try std.testing.expectEqual(
-        @as(u8, 17),
-        (try control.run(.{ .battery = .case }, deadline_ms)).battery.report.case.?.level,
+        @as(u8, 100),
+        (try control.run(.{ .battery = .right }, deadline_ms)).battery.report.right.?.level,
     );
 
     _ = c.close(sockets[0]);

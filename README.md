@@ -1,6 +1,6 @@
 # airpodsctl
 
-`airpodsctl` is a small Linux command-line utility for reading settings and state from connected AirPods and changing supported settings. Commands are one-shot by default, while an optional foreground session service can retain the AACP Bluetooth connection for faster subsequent operations. There is no tray application, BLE scanner, media integration, or network listener.
+`airpodsctl` is a small Linux command-line utility for reading settings and state from connected AirPods and changing supported settings. Commands are one-shot by default, while an optional foreground session service can retain the AACP Bluetooth connection for faster subsequent operations. There is no tray application, BLE proximity scanner, media integration, or network listener.
 
 The utility is currently tested with AirPods Pro 2 with USB-C. Other AirPods models that expose the same AACP listening-mode and battery-report protocols may work, but Apple does not publish these protocols and firmware updates can change them.
 
@@ -26,7 +26,6 @@ transparency
 $ airpodsctl battery
 left 99 charging
 right 100 discharging
-case 17 discharging
 $ airpodsctl battery left
 99
 ```
@@ -60,9 +59,11 @@ The available commands are:
 - `transparency`: pass surrounding sound through the earbuds.
 - `adaptive`: automatically adjust noise control for the surroundings.
 - `toggle [MODE...]`: cycle through the supplied modes in order, wrapping from the last mode to the first. If the current mode is not listed, the first supplied mode is selected. Supported mode arguments are `anc`, `off`, `transparency`, and `adaptive`, and each may be listed once. With one mode, `toggle` always selects it; with no modes, it retains the default ANC/Off cycle.
-- `battery`: print the left, right, and case battery levels and charging states. A component that is not present in the report, which is common for a closed case, is printed as `unavailable`.
-- `battery left|right|case`: print only the selected component's battery percentage. The command waits for a report containing that component and fails if the AirPods do not provide one before the overall deadline.
+- `battery`: print the left and right earbud battery levels and charging states. An earbud that is not present in the report is printed as `unavailable`.
+- `battery left|right`: print only the selected earbud's battery percentage. The command waits for a report containing that earbud and fails if the AirPods do not provide one before the overall deadline.
 - `serve`: run the persistent foreground session service. `--device MAC` selects which AirPods the service owns.
+
+Case battery reporting is deprecated and `battery case` is invalid usage. AACP reports the case as `0 disconnected` when it cannot relay a case reading, so presenting that record as a percentage is misleading. Accurate case state requires Apple BLE proximity advertisements, which are deliberately outside the current program scope. The requirements for reconsidering that feature are recorded in [plans/ble-advertisments.md](plans/ble-advertisments.md).
 
 The sole connected AirPods device is selected automatically. When more than one pair is connected, select one explicitly:
 
@@ -109,7 +110,7 @@ The utility asks BlueZ for already-connected AirPods over the system D-Bus, then
 
 Persistent clients communicate through a versioned `SOCK_SEQPACKET` Unix socket at `$XDG_RUNTIME_DIR/airpodsctl.sock`. The socket is created with mode `0600`, accepted peers must have the service's user ID, messages are bounded, and clients can request only typed operations implemented by the program—not arbitrary AACP packets. The service safely replaces an owner-matched stale socket but never removes an unexpected file at that path. It does not expose a network listener.
 
-The utility does not pair devices, initiate a normal Bluetooth connection, scan for BLE advertisements, run with elevated privileges, or write AirPods configuration except when an explicit setting command requests a change.
+The utility does not pair devices, initiate a normal Bluetooth connection, scan for BLE proximity advertisements, run with elevated privileges, or write AirPods configuration except when an explicit setting command requests a change. Case battery will not be inferred from AACP placeholder records.
 
 Each invocation has a three-second overall deadline. A mode-changing command is successful only when the AirPods send a listening-mode notification containing the requested mode.
 

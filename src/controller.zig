@@ -31,11 +31,10 @@ pub const Controller = struct {
             self.session.channel.failure.set("AirPods returned an invalid battery response", .{});
             return error.ProtocolFailure;
         }) |report| {
-            // Battery packets may omit a closed case, so merge only records present in this event.
+            // A notification may contain only one earbud, so preserve the other cached reading.
             if (report.left) |reading| self.state.battery.left = reading;
             if (report.right) |reading| self.state.battery.right = reading;
-            if (report.case) |reading| self.state.battery.case = reading;
-            self.state.battery_generation +%= 1;
+            if (report.left != null or report.right != null) self.state.battery_generation +%= 1;
         }
     }
 

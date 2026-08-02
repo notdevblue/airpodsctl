@@ -25,7 +25,7 @@ pub const usage =
     \\  anc, off, transparency, adaptive
     \\
     \\Battery components:
-    \\  left, right, case
+    \\  left, right
     \\
     \\Options:
     \\  -d, --device MAC  Select connected AirPods by Bluetooth address

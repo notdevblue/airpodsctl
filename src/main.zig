@@ -55,10 +55,8 @@ fn writeResult(result: operations.Result) void {
                 std.fmt.bufPrint(&buffer, "{d}\n", .{value.report.get(component).?.level}) catch return,
             );
         } else {
-            // Keep aggregate output stable even when a closed case is not reported.
             writeBatteryLine(.left, value.report.left);
             writeBatteryLine(.right, value.report.right);
-            writeBatteryLine(.case, value.report.case);
         },
     }
 }
