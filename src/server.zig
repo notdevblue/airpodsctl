@@ -102,13 +102,6 @@ const Server = struct {
 
     fn handleControllerEvent(self: *Server, event: controller.Event) void {
         switch (event) {
-            .automatic_ear_detection => |setting| {
-                self.wear.updateSetting(
-                    setting,
-                    if (self.connection) |*connection| connection.control.state.wear else null,
-                );
-                if (setting == .off) self.players.clear();
-            },
             .wear => |report| {
                 switch (self.wear.updateWear(report, self.players.hasOwnership())) {
                     .none => {},
@@ -135,7 +128,7 @@ const Server = struct {
                     self.switching.remoteTakeover();
                 }
             },
-            .listening_mode, .battery => {},
+            .listening_mode, .battery, .automatic_ear_detection => {},
         }
     }
 

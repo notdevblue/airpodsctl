@@ -3,7 +3,7 @@
 
 struct fake_mpris;
 
-struct fake_mpris *fake_mpris_create(const char *name, int playing);
+struct fake_mpris *fake_mpris_create(const char *name, int playing, int delayed_pause);
 void fake_mpris_destroy(struct fake_mpris *player);
 int fake_mpris_is_playing(const struct fake_mpris *player);
 int fake_mpris_set_playing(struct fake_mpris *player, int playing);

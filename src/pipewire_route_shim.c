@@ -15,9 +15,13 @@
 
 struct route_node {
     uint32_t id;
+    struct pw_node *proxy;
+    struct spa_hook listener;
+    int listener_added;
     char name[MAX_NAME + 1];
     char address[18];
     int profile_is_a2dp;
+    int active;
 };
 
 struct airpodsctl_route {
@@ -88,14 +92,40 @@ static const struct pw_metadata_events metadata_events = {
     .property = route_metadata_property,
 };
 
+static void route_node_info(void *data, const struct pw_node_info *info) {
+    struct route_node *node = data;
+    const char *address;
+    const char *profile;
+
+    if (info == NULL || info->props == NULL) return;
+    address = spa_dict_lookup(info->props, SPA_KEY_API_BLUEZ5_ADDRESS);
+    profile = spa_dict_lookup(info->props, SPA_KEY_API_BLUEZ5_PROFILE);
+    node->address[0] = '\0';
+    if (address != NULL && strlen(address) == 17) memcpy(node->address, address, 18);
+    node->profile_is_a2dp = profile != NULL && strstr(profile, "a2dp") != NULL;
+}
+
+static const struct pw_node_events node_events = {
+    PW_VERSION_NODE_EVENTS,
+    .info = route_node_info,
+};
+
+static void route_clear_node(struct airpodsctl_route *route, struct route_node *node) {
+    if (!node->active) return;
+    if (node->listener_added) spa_hook_remove(&node->listener);
+    if (node->proxy != NULL) pw_proxy_destroy((struct pw_proxy *)node->proxy);
+    memset(node, 0, sizeof(*node));
+    route->node_count--;
+}
+
 static void route_remove_node(struct airpodsctl_route *route, uint32_t id) {
     size_t index;
 
-    for (index = 0; index < route->node_count; index++) {
-        if (route->nodes[index].id != id) continue;
-        route->nodes[index] = route->nodes[route->node_count - 1];
-        route->node_count--;
-        return;
+    for (index = 0; index < MAX_NODES; index++) {
+        if (route->nodes[index].active && route->nodes[index].id == id) {
+            route_clear_node(route, &route->nodes[index]);
+            return;
+        }
     }
 }
 
@@ -114,6 +144,7 @@ static void route_registry_global(
     const char *profile;
     const char *metadata_name;
     struct route_node *node;
+    size_t index;
 
     (void)permissions;
     if (object_type == NULL) return;
@@ -125,14 +156,42 @@ static void route_registry_global(
             return;
         }
 
-        node = &route->nodes[route->node_count++];
+        node = NULL;
+        for (index = 0; index < MAX_NODES; index++) {
+            if (!route->nodes[index].active) {
+                node = &route->nodes[index];
+                break;
+            }
+        }
+        if (node == NULL) return;
+
         memset(node, 0, sizeof(*node));
+        node->active = 1;
         node->id = id;
         memcpy(node->name, name, strlen(name) + 1);
         address = spa_dict_lookup(properties, SPA_KEY_API_BLUEZ5_ADDRESS);
         if (address != NULL && strlen(address) == 17) memcpy(node->address, address, 18);
         profile = spa_dict_lookup(properties, SPA_KEY_API_BLUEZ5_PROFILE);
         node->profile_is_a2dp = profile != NULL && strstr(profile, "a2dp") != NULL;
+        node->proxy = pw_registry_bind(
+            route->registry,
+            id,
+            PW_TYPE_INTERFACE_Node,
+            version < PW_VERSION_NODE ? version : PW_VERSION_NODE,
+            0
+        );
+        if (node->proxy == NULL || pw_node_add_listener(
+                node->proxy,
+                &node->listener,
+                &node_events,
+                node
+            ) < 0) {
+            if (node->proxy != NULL) pw_proxy_destroy((struct pw_proxy *)node->proxy);
+            memset(node, 0, sizeof(*node));
+            return;
+        }
+        node->listener_added = 1;
+        route->node_count++;
         return;
     }
     if (strcmp(object_type, PW_TYPE_INTERFACE_Metadata) != 0 || route->metadata != NULL) return;
@@ -171,7 +230,10 @@ static void route_registry_global_remove(void *data, uint32_t id) {
 }
 
 void airpodsctl_route_destroy(struct airpodsctl_route *route) {
+    size_t index;
+
     if (route == NULL) return;
+    for (index = 0; index < MAX_NODES; index++) route_clear_node(route, &route->nodes[index]);
     if (route->metadata_listener_added) spa_hook_remove(&route->metadata_listener);
     if (route->registry_listener_added) spa_hook_remove(&route->registry_listener);
     if (route->core_listener_added) spa_hook_remove(&route->core_listener);
@@ -259,9 +321,10 @@ int airpodsctl_route_state(const struct airpodsctl_route *route) {
     size_t index;
 
     if (route == NULL || route->failed || route->default_sink[0] == '\0') return 0;
-    for (index = 0; index < route->node_count; index++) {
+    for (index = 0; index < MAX_NODES; index++) {
         const struct route_node *node = &route->nodes[index];
 
+        if (!node->active) continue;
         const int state = airpodsctl_route_classify(
             route->default_sink,
             node->name,

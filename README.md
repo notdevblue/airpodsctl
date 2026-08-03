@@ -97,7 +97,7 @@ The available commands are:
 
 Automatic Ear Detection and wear notifications are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/automatic-ear-detection.md). Commands therefore remain provisional and fail if the AirPods do not provide a confirmed setting or wear snapshot.
 
-Wear-aware media control requires PipeWire/WirePlumber. It acts only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink. Unknown routing, virtual default sinks, another output, a PipeWire restart, or a disabled/unknown Automatic Ear Detection setting suppresses all media actions. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
+Wear-aware media control requires PipeWire/WirePlumber. The explicitly configured `--pause-on-removal` policy operates from AACP wear notifications independently of the AirPods' Automatic Ear Detection preference. Its first valid wear snapshot establishes a baseline and never changes playback. Media actions occur only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink; unknown routing, virtual default sinks, another output, or a PipeWire restart suppresses them. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
 
 ## Experimental multipoint switching
 

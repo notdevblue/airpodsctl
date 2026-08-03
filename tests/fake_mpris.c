@@ -13,6 +13,8 @@ struct fake_mpris {
     pthread_mutex_t mutex;
     int mutex_initialized;
     atomic_int playing;
+    atomic_int delayed_pause;
+    atomic_int pause_pending;
     atomic_int stop;
 };
 
@@ -20,7 +22,11 @@ static int fake_pause(sd_bus_message *message, void *data, sd_bus_error *error) 
     struct fake_mpris *player = data;
 
     (void)error;
-    atomic_store(&player->playing, 0);
+    if (atomic_load(&player->delayed_pause)) {
+        atomic_store(&player->pause_pending, 1);
+    } else {
+        atomic_store(&player->playing, 0);
+    }
     return sd_bus_reply_method_return(message, "");
 }
 
@@ -42,13 +48,26 @@ static int fake_get_status(
     sd_bus_error *error
 ) {
     struct fake_mpris *player = data;
+    const int playing = atomic_load(&player->playing);
+    int result;
 
     (void)bus;
     (void)path;
     (void)interface;
     (void)property;
     (void)error;
-    return sd_bus_message_append(reply, "s", atomic_load(&player->playing) ? "Playing" : "Paused");
+    result = sd_bus_message_append(reply, "s", playing ? "Playing" : "Paused");
+    if (result >= 0 && playing && atomic_exchange(&player->pause_pending, 0)) {
+        atomic_store(&player->playing, 0);
+        (void)sd_bus_emit_properties_changed(
+            player->bus,
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            "PlaybackStatus",
+            NULL
+        );
+    }
+    return result;
 }
 
 static int fake_get_capability(
@@ -120,7 +139,7 @@ void fake_mpris_destroy(struct fake_mpris *player) {
     free(player);
 }
 
-struct fake_mpris *fake_mpris_create(const char *name, int playing) {
+struct fake_mpris *fake_mpris_create(const char *name, int playing, int delayed_pause) {
     struct fake_mpris *player = calloc(1, sizeof(*player));
 
     if (player == NULL) return NULL;
@@ -130,6 +149,7 @@ struct fake_mpris *fake_mpris_create(const char *name, int playing) {
     }
     player->mutex_initialized = 1;
     atomic_store(&player->playing, playing != 0);
+    atomic_store(&player->delayed_pause, delayed_pause != 0);
     if (sd_bus_open_user(&player->bus) < 0 ||
         sd_bus_add_object_vtable(
             player->bus,

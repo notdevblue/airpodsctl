@@ -1097,7 +1097,7 @@ test "automatic ear detection CLI and IPC variants are explicit" {
     try std.testing.expect(std.mem.indexOf(u8, failure.text(), "restart") != null);
 }
 
-test "wear policy initializes, transitions, and resets conservatively" {
+test "wear policy baselines snapshots, transitions, and resets conservatively" {
     const both_in = ear_detection.WearReport{ .primary = .in_ear, .secondary = .in_ear };
     const one_in = ear_detection.WearReport{ .primary = .in_ear, .secondary = .out_of_ear };
     const none_in = ear_detection.WearReport{ .primary = .out_of_ear, .secondary = .in_case };
@@ -1107,7 +1107,6 @@ test "wear policy initializes, transitions, and resets conservatively" {
     };
     var one = wear_policy.Policy{ .mode = .one };
 
-    one.updateSetting(.on, null);
     try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(both_in, false));
     try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(.{
         .primary = both_in.secondary,
@@ -1118,11 +1117,13 @@ test "wear policy initializes, transitions, and resets conservatively" {
     try std.testing.expectEqual(wear_policy.Decision.resume_media, one.updateWear(both_in, true));
     try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(unknown, true));
     try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(one_in, true));
-    one.updateSetting(.off, one_in);
-    try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(both_in, true));
+    try std.testing.expectEqual(wear_policy.Decision.resume_media, one.updateWear(both_in, true));
+    one.reset();
+    try std.testing.expectEqual(wear_policy.Decision.none, one.updateWear(both_in, false));
+    try std.testing.expectEqual(wear_policy.Decision.pause_media, one.updateWear(one_in, false));
 
     var both = wear_policy.Policy{ .mode = .both };
-    both.updateSetting(.on, both_in);
+    try std.testing.expectEqual(wear_policy.Decision.none, both.updateWear(both_in, false));
     try std.testing.expectEqual(wear_policy.Decision.none, both.updateWear(one_in, false));
     try std.testing.expectEqual(wear_policy.Decision.pause_media, both.updateWear(none_in, false));
     try std.testing.expectEqual(wear_policy.Decision.resume_media, both.updateWear(one_in, true));
@@ -1130,7 +1131,6 @@ test "wear policy initializes, transitions, and resets conservatively" {
     try std.testing.expectEqual(wear_policy.Decision.none, both.updateWear(none_in, true));
 
     var off = wear_policy.Policy{ .mode = .off };
-    off.updateSetting(.on, both_in);
     try std.testing.expectEqual(wear_policy.Decision.none, off.updateWear(none_in, true));
 }
 

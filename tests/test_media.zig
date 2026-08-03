@@ -45,10 +45,13 @@ fn waitForPlaybackUpdate(
 }
 
 test "MPRIS ownership pauses and resumes only players changed by the controller" {
-    const playing = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_playing", 1) orelse
+    const playing = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_playing", 1, 0) orelse
         return error.SkipZigTest;
     defer c.fake_mpris_destroy(playing);
-    const paused = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_paused", 0) orelse
+    const delayed = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_delayed", 1, 1) orelse
+        return error.SkipZigTest;
+    defer c.fake_mpris_destroy(delayed);
+    const paused = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_paused", 0, 0) orelse
         return error.SkipZigTest;
     defer c.fake_mpris_destroy(paused);
     var controller = media.Controller{};
@@ -56,17 +59,19 @@ test "MPRIS ownership pauses and resumes only players changed by the controller"
 
     try controller.pausePlayers();
     try std.testing.expect(c.fake_mpris_is_playing(playing) == 0);
+    try std.testing.expect(c.fake_mpris_is_playing(delayed) == 0);
     try std.testing.expect(c.fake_mpris_is_playing(paused) == 0);
     try std.testing.expect(controller.hasOwnership());
 
     try controller.resumePlayers();
     try std.testing.expect(c.fake_mpris_is_playing(playing) != 0);
+    try std.testing.expect(c.fake_mpris_is_playing(delayed) != 0);
     try std.testing.expect(c.fake_mpris_is_playing(paused) == 0);
     try std.testing.expect(!controller.hasOwnership());
 }
 
 test "MPRIS manual playback cancels automatic resume ownership" {
-    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_override", 1) orelse
+    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_override", 1, 0) orelse
         return error.SkipZigTest;
     defer c.fake_mpris_destroy(player);
     var controller = media.Controller{};
@@ -82,7 +87,7 @@ test "MPRIS manual playback cancels automatic resume ownership" {
 }
 
 test "MPRIS player disappearance clears automatic resume ownership" {
-    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_disappear", 1) orelse
+    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_disappear", 1, 0) orelse
         return error.SkipZigTest;
     var player_destroyed = false;
     defer if (!player_destroyed) c.fake_mpris_destroy(player);
@@ -97,7 +102,7 @@ test "MPRIS player disappearance clears automatic resume ownership" {
 }
 
 test "MPRIS playback monitoring establishes a baseline and reports new play edges" {
-    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_monitor", 1) orelse
+    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_monitor", 1, 0) orelse
         return error.SkipZigTest;
     defer c.fake_mpris_destroy(player);
     var controller = media.Controller{};
@@ -120,7 +125,7 @@ test "MPRIS playback monitoring treats a new playing service as an edge" {
     try std.testing.expect(!baseline.playing);
     try std.testing.expect(!baseline.play_edge);
 
-    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_new", 1) orelse
+    const player = c.fake_mpris_create("org.mpris.MediaPlayer2.airpodsctl_new", 1, 0) orelse
         return error.SkipZigTest;
     defer c.fake_mpris_destroy(player);
     try waitForPlaybackUpdate(&controller, true, true);

@@ -8,6 +8,7 @@ const c = @cImport({
     @cInclude("poll.h");
     @cInclude("stdlib.h");
     @cInclude("systemd/sd-bus.h");
+    @cInclude("unistd.h");
 });
 
 const call_timeout_us = 100_000;
@@ -433,8 +434,15 @@ pub const Controller = struct {
             if (self.getPlaybackStatus(service_z) != .playing or !self.getCapability(service_z, "CanPause")) {
                 continue;
             }
-            if (self.callPlayer(service_z, "Pause") and self.getPlaybackStatus(service_z) == .paused) {
-                self.recordOwner(service, service_z);
+            if (!self.callPlayer(service_z, "Pause")) continue;
+            while (withinDeadline(deadline_ms)) {
+                const playback_status = self.getPlaybackStatus(service_z);
+                if (playback_status == .paused) {
+                    self.recordOwner(service, service_z);
+                    break;
+                }
+                if (playback_status != .playing) break;
+                _ = c.usleep(10_000);
             }
         }
         self.refresh_pending = true;
