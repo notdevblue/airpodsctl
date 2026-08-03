@@ -2,21 +2,19 @@ const std = @import("std");
 const battery = @import("battery");
 const cli = @import("cli");
 const command = @import("command");
-const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
 const smart_routing = @import("smart_routing");
 const support = @import("support");
 const transport = @import("transport");
+const wear_detection = @import("wear_detection");
 
 const c = support.c;
 const request_magic_v1 = "APC1";
 const request_magic_v2 = "APC2";
 const request_magic_v3 = "APC3";
-const request_magic_v4 = "APC4";
 const response_magic_v1 = "APR1";
 const response_magic_v2 = "APR2";
 const response_magic_v3 = "APR3";
-const response_magic_v4 = "APR4";
 const socket_suffix = "/airpodsctl.sock";
 const packet_size = 512;
 const request_timeout_ms = 3000;
@@ -27,7 +25,6 @@ pub const ProtocolVersion = enum {
     v1,
     v2,
     v3,
-    v4,
 };
 
 pub const SocketPath = struct {
@@ -51,7 +48,6 @@ fn operationVersion(operation: command.Operation) ProtocolVersion {
         .noise_control, .battery => .v1,
         .wear_status => .v2,
         .switching => .v3,
-        .automatic_ear_detection => .v4,
     };
 }
 
@@ -60,7 +56,6 @@ fn requestMagic(version: ProtocolVersion) *const [4]u8 {
         .v1 => request_magic_v1,
         .v2 => request_magic_v2,
         .v3 => request_magic_v3,
-        .v4 => request_magic_v4,
     };
 }
 
@@ -69,7 +64,6 @@ fn responseMagic(version: ProtocolVersion) *const [4]u8 {
         .v1 => response_magic_v1,
         .v2 => response_magic_v2,
         .v3 => response_magic_v3,
-        .v4 => response_magic_v4,
     };
 }
 
@@ -78,7 +72,6 @@ fn decodeRequestVersion(packet: []const u8) ?ProtocolVersion {
     if (std.mem.eql(u8, packet[0..4], request_magic_v1)) return .v1;
     if (std.mem.eql(u8, packet[0..4], request_magic_v2)) return .v2;
     if (std.mem.eql(u8, packet[0..4], request_magic_v3)) return .v3;
-    if (std.mem.eql(u8, packet[0..4], request_magic_v4)) return .v4;
     return null;
 }
 
@@ -87,7 +80,6 @@ fn decodeResponseVersion(packet: []const u8) ?ProtocolVersion {
     if (std.mem.eql(u8, packet[0..4], response_magic_v1)) return .v1;
     if (std.mem.eql(u8, packet[0..4], response_magic_v2)) return .v2;
     if (std.mem.eql(u8, packet[0..4], response_magic_v3)) return .v3;
-    if (std.mem.eql(u8, packet[0..4], response_magic_v4)) return .v4;
     return null;
 }
 
@@ -170,15 +162,6 @@ pub fn encodeRequest(buffer: []u8, value: cli.Command) error{InvalidRequest}![]c
             buffer[payload] = if (component) |selected| @intFromEnum(selected) else 0;
             return buffer[0 .. payload + 1];
         },
-        .automatic_ear_detection => |action| {
-            buffer[4] = 3;
-            buffer[payload] = switch (action) {
-                .status => 1,
-                .on => 2,
-                .off => 3,
-            };
-            return buffer[0 .. payload + 1];
-        },
         .wear_status => {
             buffer[4] = 4;
             buffer[payload] = 0;
@@ -247,15 +230,6 @@ pub fn decodeRequest(packet: []const u8) error{InvalidRequest}!Request {
                     else => return error.InvalidRequest,
                 } };
             },
-            3 => operation: {
-                if (version != .v4 or packet.len != payload + 1) return error.InvalidRequest;
-                break :operation .{ .automatic_ear_detection = switch (packet[payload]) {
-                    1 => .status,
-                    2 => .on,
-                    3 => .off,
-                    else => return error.InvalidRequest,
-                } };
-            },
             4 => operation: {
                 if (version != .v2 or packet.len != payload + 1 or packet[payload] != 0) {
                     return error.InvalidRequest;
@@ -304,11 +278,6 @@ pub fn encodeResultForVersion(buffer: []u8, result: command.Result, version: Pro
             @memset(buffer[13..16], 0);
             return buffer[0..16];
         },
-        .automatic_ear_detection => |status| {
-            buffer[5] = 3;
-            buffer[6] = @intFromEnum(status);
-            return buffer[0..7];
-        },
         .wear_status => |report| {
             buffer[5] = 4;
             buffer[6] = @intFromEnum(report.primary);
@@ -343,7 +312,6 @@ pub fn encodeResult(buffer: []u8, result: command.Result) []const u8 {
         .mode, .battery => .v1,
         .wear_status => .v2,
         .switching => .v3,
-        .automatic_ear_detection => .v4,
     });
 }
 
@@ -402,19 +370,9 @@ pub fn decodeResultForVersion(
                 .right = try decodeReading(packet[10..13]),
             },
         } } else error.InvalidResponse,
-        3 => if (version == .v4 and packet.len == 7) .{
-            .automatic_ear_detection = switch (packet[6]) {
-                @intFromEnum(ear_detection.Outcome.unknown) => .unknown,
-                @intFromEnum(ear_detection.Outcome.on) => .on,
-                @intFromEnum(ear_detection.Outcome.off) => .off,
-                @intFromEnum(ear_detection.Outcome.requested_on) => .requested_on,
-                @intFromEnum(ear_detection.Outcome.requested_off) => .requested_off,
-                else => return error.InvalidResponse,
-            },
-        } else error.InvalidResponse,
         4 => if (version == .v2 and packet.len == 8) .{ .wear_status = .{
-            .primary = @enumFromInt(packet[6]),
-            .secondary = @enumFromInt(packet[7]),
+            .primary = @as(wear_detection.WearState, @enumFromInt(packet[6])),
+            .secondary = @as(wear_detection.WearState, @enumFromInt(packet[7])),
         } } else error.InvalidResponse,
         5 => if (version == .v3 and packet.len == 9) .{ .switching = .{
             .hosts = switch (packet[6]) {

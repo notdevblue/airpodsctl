@@ -128,7 +128,7 @@ const Server = struct {
                     self.switching.remoteTakeover();
                 }
             },
-            .listening_mode, .battery, .automatic_ear_detection => {},
+            .listening_mode, .battery => {},
         }
     }
 

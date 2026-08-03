@@ -1,5 +1,5 @@
 const command = @import("command");
-const ear_detection = @import("ear_detection");
+const wear_detection = @import("wear_detection");
 
 pub const Decision = enum {
     none,
@@ -15,7 +15,7 @@ pub const Policy = struct {
         self.previous_count = null;
     }
 
-    pub fn updateWear(self: *Policy, report: ear_detection.WearReport, owns_media: bool) Decision {
+    pub fn updateWear(self: *Policy, report: wear_detection.WearReport, owns_media: bool) Decision {
         if (self.mode == .off) return .none;
         const new_count = report.inEarCount() orelse {
             // Do not infer a transition across a period containing an unknown earbud state.

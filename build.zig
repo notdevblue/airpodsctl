@@ -54,13 +54,11 @@ pub fn build(builder: *std.Build) void {
     });
     noise_control_module.addImport("control_command", control_command_module);
 
-    const ear_detection_module = builder.createModule(.{
-        .root_source_file = builder.path("src/ear_detection.zig"),
+    const wear_detection_module = builder.createModule(.{
+        .root_source_file = builder.path("src/wear_detection.zig"),
         .target = target,
         .optimize = optimize,
     });
-    ear_detection_module.addImport("aacp", aacp_module);
-    ear_detection_module.addImport("control_command", control_command_module);
 
     const smart_routing_module = builder.createModule(.{
         .root_source_file = builder.path("src/smart_routing.zig"),
@@ -82,7 +80,7 @@ pub fn build(builder: *std.Build) void {
         .optimize = optimize,
     });
     command_module.addImport("battery", battery_module);
-    command_module.addImport("ear_detection", ear_detection_module);
+    command_module.addImport("wear_detection", wear_detection_module);
     command_module.addImport("noise_control", noise_control_module);
     command_module.addImport("smart_routing", smart_routing_module);
 
@@ -95,10 +93,9 @@ pub fn build(builder: *std.Build) void {
     controller_module.addImport("battery", battery_module);
     controller_module.addImport("command", command_module);
     controller_module.addImport("control_command", control_command_module);
-    controller_module.addImport("ear_detection", ear_detection_module);
+    controller_module.addImport("wear_detection", wear_detection_module);
     controller_module.addImport("noise_control", noise_control_module);
     controller_module.addImport("smart_routing", smart_routing_module);
-    controller_module.addImport("transport", transport_module);
 
     const cli_module = builder.createModule(.{
         .root_source_file = builder.path("src/cli.zig"),
@@ -107,7 +104,6 @@ pub fn build(builder: *std.Build) void {
     });
     cli_module.addImport("battery", battery_module);
     cli_module.addImport("command", command_module);
-    cli_module.addImport("ear_detection", ear_detection_module);
     cli_module.addImport("noise_control", noise_control_module);
     cli_module.addImport("switching_policy", switching_policy_module);
 
@@ -125,7 +121,7 @@ pub fn build(builder: *std.Build) void {
         .optimize = optimize,
     });
     wear_policy_module.addImport("command", command_module);
-    wear_policy_module.addImport("ear_detection", ear_detection_module);
+    wear_policy_module.addImport("wear_detection", wear_detection_module);
 
     const media_module = builder.createModule(.{
         .root_source_file = builder.path("src/media.zig"),
@@ -169,7 +165,7 @@ pub fn build(builder: *std.Build) void {
     ipc_module.addImport("battery", battery_module);
     ipc_module.addImport("cli", cli_module);
     ipc_module.addImport("command", command_module);
-    ipc_module.addImport("ear_detection", ear_detection_module);
+    ipc_module.addImport("wear_detection", wear_detection_module);
     ipc_module.addImport("noise_control", noise_control_module);
     ipc_module.addImport("smart_routing", smart_routing_module);
     ipc_module.addImport("support", support_module);
@@ -203,7 +199,7 @@ pub fn build(builder: *std.Build) void {
     executable_module.addImport("battery", battery_module);
     executable_module.addImport("cli", cli_module);
     executable_module.addImport("command", command_module);
-    executable_module.addImport("ear_detection", ear_detection_module);
+    executable_module.addImport("wear_detection", wear_detection_module);
     executable_module.addImport("ipc", ipc_module);
     executable_module.addImport("server", server_module);
     executable_module.addImport("support", support_module);
@@ -231,7 +227,7 @@ pub fn build(builder: *std.Build) void {
     test_module.addImport("command", command_module);
     test_module.addImport("control_command", control_command_module);
     test_module.addImport("controller", controller_module);
-    test_module.addImport("ear_detection", ear_detection_module);
+    test_module.addImport("wear_detection", wear_detection_module);
     test_module.addImport("ipc", ipc_module);
     test_module.addImport("noise_control", noise_control_module);
     test_module.addImport("pipewire_route", pipewire_route_module);
@@ -286,9 +282,6 @@ pub fn build(builder: *std.Build) void {
         &.{ "battery", "invalid" },
         &.{ "battery", "case" },
         &.{ "battery", "left", "right" },
-        &.{"automatic-ear-detection"},
-        &.{ "automatic-ear-detection", "invalid" },
-        &.{ "automatic-ear-detection", "status", "on" },
         &.{ "wear-status", "extra" },
         &.{"switching"},
         &.{ "switching", "invalid" },

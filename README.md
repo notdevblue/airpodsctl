@@ -28,10 +28,6 @@ left 99 charging
 right 100 discharging
 $ airpodsctl battery left
 99
-$ airpodsctl automatic-ear-detection status
-unknown
-$ airpodsctl automatic-ear-detection off
-requested-off
 $ airpodsctl wear-status
 primary in-ear
 secondary out-of-ear
@@ -88,16 +84,15 @@ The available commands are:
 - `toggle [MODE...]`: cycle through the supplied modes in order, wrapping from the last mode to the first. If the current mode is not listed, the first supplied mode is selected. Supported mode arguments are `anc`, `off`, `transparency`, and `adaptive`, and each may be listed once. With one mode, `toggle` always selects it; with no modes, it retains the default ANC/Off cycle.
 - `battery`: print the left and right earbud battery levels and charging states. An earbud that is not present in the report is printed as `unavailable`.
 - `battery left|right`: print only the selected earbud's battery percentage. The command waits for a report containing that earbud and fails if the AirPods do not provide one before the overall deadline.
-- `automatic-ear-detection status|on|off`: observe or request a change to the AirPods' Automatic Ear Detection preference. `status` prints the last setting announced during the current AACP session, the connection-scoped `requested-on` or `requested-off` provenance of a later write, or `unknown` when neither exists. The protocol has no verified read request, and the tested firmware sends no acknowledgement after a write, so requested results confirm transport delivery—not the resulting device state—and are discarded on reconnect.
 - `wear-status`: print the most recent primary and secondary AACP wear states. These labels describe protocol roles, not permanent left/right identity. A state is `in-ear`, `out-of-ear`, `in-case`, or `unknown`.
 - `switching status`: request connected-host, ownership, and remote-activity state. `multipoint ready` means two hosts and all required runtime fields were observed; `unverified` can also mean the second host is absent rather than misconfigured.
 - `switching take [--force]`: ask the AirPods to route ownership to Linux. A normal take requires confirmed idle remote activity. `--force` can interrupt iPhone media or a call and should be used only as an intentional override.
 - `switching release`: yield ownership without disconnecting either Bluetooth host or changing a BlueZ audio profile.
 - `serve`: run the persistent foreground session service. `--device MAC` selects which AirPods the service owns. Add `--pause-on-removal=one` or `--pause-on-removal=both` to enable wear-aware MPRIS control, or `--auto-switch=mpris` to enable automatic multipoint takeover; both policies default to `off`.
 
-Automatic Ear Detection and wear notifications are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/automatic-ear-detection.md). Commands therefore remain provisional. An unannounced and unrequested Automatic Ear Detection setting is reported as `unknown`, setting requests are labeled as unconfirmed for the current connection, and `wear-status` fails without a wear snapshot.
+Wear notifications and host media automation are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/pause-on-removal.md). `wear-status` therefore remains provisional and fails when the AirPods do not provide a wear snapshot.
 
-Wear-aware media control requires PipeWire/WirePlumber. The explicitly configured `--pause-on-removal` policy operates from AACP wear notifications independently of the AirPods' Automatic Ear Detection preference. Its first valid wear snapshot establishes a baseline and never changes playback. Media actions occur only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink; unknown routing, virtual default sinks, another output, or a PipeWire restart suppresses them. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
+Wear-aware media control requires PipeWire/WirePlumber. The explicitly configured `--pause-on-removal` policy is the only ear-detection automation exposed by airpodsctl and operates directly from AACP wear notifications. Its first valid wear snapshot establishes a baseline and never changes playback. Media actions occur only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink; unknown routing, virtual default sinks, another output, or a PipeWire restart suppresses them. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
 
 ## Experimental multipoint switching
 
@@ -130,7 +125,7 @@ The sole connected AirPods device is selected automatically. When more than one 
 $ airpodsctl --device 18:3F:70:6F:A1:06 toggle
 ```
 
-Successful listening-mode commands print the mode confirmed by the AirPods. Automatic Ear Detection setters print `requested-on` or `requested-off` after the write is delivered to the Bluetooth transport; status repeats that request provenance for the current connection unless the AirPods later announce a confirmed value. It prints `unknown` when neither an observation nor a current-connection request exists. A component-specific battery command prints an integer percentage, while the aggregate command prints stable, space-delimited `component level state` lines. Charging state is one of `unknown`, `charging`, `discharging`, or `disconnected`. Successful commands exit with status `0`; discovery, Bluetooth, timeout, malformed-response, and acknowledgement failures use status `1`; invalid command-line usage uses status `2`.
+Successful listening-mode commands print the mode confirmed by the AirPods. A component-specific battery command prints an integer percentage, while the aggregate command prints stable, space-delimited `component level state` lines. Charging state is one of `unknown`, `charging`, `discharging`, or `disconnected`. Successful commands exit with status `0`; discovery, Bluetooth, timeout, malformed-response, and acknowledgement failures use status `1`; invalid command-line usage uses status `2`.
 
 ## Persistent user service
 
@@ -175,13 +170,13 @@ $ nix run . -- status
 
 ## Design and security
 
-The utility asks BlueZ for already-connected AirPods over the system D-Bus, then opens Apple's AACP L2CAP PSM `0x1001`. A shared session layer performs the handshake and notification subscription; independent feature modules then parse or send only the packets they own. A central controller is the sole AACP reader and routes every notification into connection-scoped state and typed events, preventing one feature from consuming another feature's events. Generic control-command framing is shared by listening mode and Automatic Ear Detection.
+The utility asks BlueZ for already-connected AirPods over the system D-Bus, then opens Apple's AACP L2CAP PSM `0x1001`. A shared session layer performs the handshake and notification subscription; independent feature modules then parse or send only the packets they own. A central controller is the sole AACP reader and routes every notification into connection-scoped state and typed events, preventing one feature from consuming another feature's events. Generic control-command framing is shared by listening mode and multipoint ownership.
 
-Persistent clients communicate through a versioned `SOCK_SEQPACKET` Unix socket at `$XDG_RUNTIME_DIR/airpodsctl.sock`. Version 1 remains in use for listening-mode and battery operations, version 2 for wear status, and version 3 for typed multipoint status and ownership operations. Version 4 carries Automatic Ear Detection's observed `on`, `off`, or `unknown` status and its explicit `requested-on` or `requested-off` write outcome. The socket is created with mode `0600`, accepted peers must have the service's user ID, messages are bounded, and clients can request only typed operations implemented by the program—not arbitrary AACP packets. The service safely replaces an owner-matched stale socket but never removes an unexpected file at that path. It does not expose a network listener.
+Persistent clients communicate through a versioned `SOCK_SEQPACKET` Unix socket at `$XDG_RUNTIME_DIR/airpodsctl.sock`. Version 1 remains in use for listening-mode and battery operations, version 2 for wear status, and version 3 for typed multipoint status and ownership operations. The socket is created with mode `0600`, accepted peers must have the service's user ID, messages are bounded, and clients can request only typed operations implemented by the program—not arbitrary AACP packets. The service safely replaces an owner-matched stale socket but never removes an unexpected file at that path. It does not expose a network listener.
 
-The utility does not pair devices, initiate a normal Bluetooth connection, scan for BLE proximity advertisements, run with elevated privileges, change the default audio sink, or write AirPods configuration except when an explicit setting command requests a change. Multipoint ownership changes stay on the existing AACP connection and never call BlueZ connect, disconnect, or profile-changing methods. Case battery will not be inferred from AACP placeholder records.
+The utility does not pair devices, initiate a normal Bluetooth connection, scan for BLE proximity advertisements, run with elevated privileges, change the default audio sink, or expose an AirPods ear-detection preference. Multipoint ownership changes stay on the existing AACP connection and never call BlueZ connect, disconnect, or profile-changing methods. Case battery will not be inferred from AACP placeholder records.
 
-Each invocation has a three-second overall deadline. A listening-mode change is successful only when the AirPods send a newer notification containing the requested value; Automatic Ear Detection is explicitly write-only because the tested firmware did not acknowledge either value. Media discovery is bounded to 16 MPRIS services, and individual D-Bus calls have fixed deadlines so an unresponsive player does not invalidate the AirPods connection.
+Each invocation has a three-second overall deadline. A listening-mode change is successful only when the AirPods send a newer notification containing the requested value. Media discovery is bounded to 16 MPRIS services, and individual D-Bus calls have fixed deadlines so an unresponsive player does not invalidate the AirPods connection.
 
 Protocol behavior was independently implemented from observed AACP traffic and cross-checked against the reverse-engineering work in [LibrePods](https://github.com/kavishdevar/librepods) and [MagicPodsCore](https://github.com/steam3d/MagicPodsCore).
 

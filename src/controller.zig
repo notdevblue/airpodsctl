@@ -2,13 +2,9 @@ const aacp = @import("aacp");
 const battery = @import("battery");
 const command = @import("command");
 const control_command = @import("control_command");
-const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
 const smart_routing = @import("smart_routing");
-const transport = @import("transport");
-
-// Initialization subscribes to notifications but provides no setting read request.
-const setting_status_observation_ms = 200;
+const wear_detection = @import("wear_detection");
 
 pub const Error = aacp.Error;
 
@@ -17,10 +13,7 @@ pub const State = struct {
     listening_mode_generation: u64 = 0,
     battery: battery.Report = .{},
     battery_generation: u64 = 0,
-    automatic_ear_detection: ?ear_detection.Setting = null,
-    automatic_ear_detection_requested: ?ear_detection.Setting = null,
-    automatic_ear_detection_generation: u64 = 0,
-    wear: ?ear_detection.WearReport = null,
+    wear: ?wear_detection.WearReport = null,
     wear_generation: u64 = 0,
     routing: smart_routing.State = .{},
     routing_generation: u64 = 0,
@@ -31,8 +24,7 @@ pub const State = struct {
 pub const Event = union(enum) {
     listening_mode: noise_control.Mode,
     battery: battery.Report,
-    automatic_ear_detection: ear_detection.Setting,
-    wear: ear_detection.WearReport,
+    wear: wear_detection.WearReport,
     routing: smart_routing.Status,
 };
 
@@ -67,15 +59,6 @@ pub const Controller = struct {
                 self.state.listening_mode_generation +%= 1;
                 return .{ .listening_mode = mode };
             }
-            if (ear_detection.parseSetting(control_state) catch {
-                self.session.channel.failure.set("AirPods returned an invalid Automatic Ear Detection response", .{});
-                return error.ProtocolFailure;
-            }) |setting| {
-                self.state.automatic_ear_detection = setting;
-                self.state.automatic_ear_detection_requested = null;
-                self.state.automatic_ear_detection_generation +%= 1;
-                return .{ .automatic_ear_detection = setting };
-            }
             if (smart_routing.parseOwnership(control_state) catch {
                 self.session.channel.failure.set("AirPods returned an invalid routing-ownership response", .{});
                 return error.ProtocolFailure;
@@ -105,7 +88,7 @@ pub const Controller = struct {
             self.state.routing_generation +%= 1;
             return .{ .routing = self.state.routing.status() };
         }
-        if (ear_detection.parseWearPacket(packet) catch {
+        if (wear_detection.parseWearPacket(packet) catch {
             self.session.channel.failure.set("AirPods returned an invalid wear-state response", .{});
             return error.ProtocolFailure;
         }) |report| {
@@ -264,37 +247,6 @@ pub const Controller = struct {
                     break :report self.state.battery;
                 },
             } },
-            .automatic_ear_detection => |action| result: {
-                if (action == .status) {
-                    if (self.state.automatic_ear_detection_requested == null) {
-                        const observation_deadline = @min(
-                            deadline_ms,
-                            transport.nowMs() + setting_status_observation_ms,
-                        );
-                        while (self.state.automatic_ear_detection == null and
-                            try self.session.channel.waitReadableUntil(observation_deadline))
-                        {
-                            try self.receiveObserved(observer);
-                        }
-                    }
-                    break :result .{ .automatic_ear_detection = if (self.state.automatic_ear_detection) |setting|
-                        ear_detection.Outcome.confirmed(setting)
-                    else if (self.state.automatic_ear_detection_requested) |setting|
-                        ear_detection.Outcome.requested(setting)
-                    else
-                        .unknown };
-                }
-
-                const final_setting: ear_detection.Setting = switch (action) {
-                    .status => unreachable,
-                    .on => .on,
-                    .off => .off,
-                };
-                try ear_detection.setSetting(&self.session, final_setting);
-                self.state.automatic_ear_detection = null;
-                self.state.automatic_ear_detection_requested = final_setting;
-                break :result .{ .automatic_ear_detection = ear_detection.Outcome.requested(final_setting) };
-            },
             .wear_status => result: {
                 while (self.state.wear == null) try self.receiveObserved(observer);
                 break :result .{ .wear_status = self.state.wear.? };

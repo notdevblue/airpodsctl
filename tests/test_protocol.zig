@@ -4,7 +4,6 @@ const battery = @import("battery");
 const cli = @import("cli");
 const control_command = @import("control_command");
 const controller = @import("controller");
-const ear_detection = @import("ear_detection");
 const ipc = @import("ipc");
 const noise_control = @import("noise_control");
 const operations = @import("command");
@@ -13,6 +12,7 @@ const smart_routing = @import("smart_routing");
 const support = @import("support");
 const switching_policy = @import("switching_policy");
 const transport = @import("transport");
+const wear_detection = @import("wear_detection");
 const wear_policy = @import("wear_policy");
 
 const c = support.c;
@@ -76,24 +76,6 @@ const BatteryExchangeResult = struct {
 const PersistentEmulatorContext = struct {
     fd: c_int,
     status: u8 = 0,
-};
-
-const EarExchange = struct {
-    action: ear_detection.Action,
-    current: ?ear_detection.Setting = null,
-    target: ear_detection.Setting,
-};
-
-const EarEmulatorContext = struct {
-    fd: c_int,
-    exchange: *const EarExchange,
-    status: u8 = 0,
-};
-
-const EarExchangeResult = struct {
-    result: ?ear_detection.Outcome,
-    follow_up: ?ear_detection.Outcome,
-    failure: support.ErrorMessage,
 };
 
 const RoutingExchange = struct {
@@ -282,79 +264,6 @@ fn runPersistentEmulator(context: *PersistentEmulatorContext) void {
     else
         0;
     _ = c.close(context.fd);
-}
-
-fn sendSetting(fd: c_int, setting: ear_detection.Setting) bool {
-    const packet = [_]u8{
-        0x04,                  0x00, 0x04, 0x00, 0x09, 0x00, 0x0a,
-        @intFromEnum(setting), 0x00, 0x00, 0x00,
-    };
-    return c.send(fd, &packet, packet.len, 0) == packet.len;
-}
-
-fn emulateEarExchange(fd: c_int, exchange: *const EarExchange) u8 {
-    const command_packet = [_]u8{
-        0x04,                          0x00, 0x04, 0x00, 0x09, 0x00, 0x0a,
-        @intFromEnum(exchange.target), 0x00, 0x00, 0x00,
-    };
-    if (!receiveInitialization(fd)) return 1;
-    if (exchange.current) |current| {
-        if (!sendSetting(fd, current)) return 2;
-    }
-    if (exchange.action == .status) {
-        if (exchange.current != null) return 0;
-
-        // Keep the transport valid beyond the controller's bounded observation window.
-        var delay = c.struct_timespec{ .tv_sec = 0, .tv_nsec = 300_000_000 };
-        _ = c.nanosleep(&delay, null);
-        return 0;
-    }
-    if (!receiveExpected(fd, &command_packet)) return 2;
-    return 0;
-}
-
-fn runEarEmulator(context: *EarEmulatorContext) void {
-    context.status = emulateEarExchange(context.fd, context.exchange);
-    _ = c.close(context.fd);
-}
-
-fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
-    var sockets: [2]c_int = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
-
-    var context = EarEmulatorContext{ .fd = sockets[1], .exchange = exchange };
-    const emulator = try std.Thread.spawn(.{}, runEarEmulator, .{&context});
-    var exchange_result = EarExchangeResult{
-        .result = null,
-        .follow_up = null,
-        .failure = .{},
-    };
-    const deadline_ms = transport.nowMs() + 1000;
-    var control = controller.Controller{ .session = aacp.Session.initialize(
-        sockets[0],
-        deadline_ms,
-        0,
-        &exchange_result.failure,
-    ) catch |failure| {
-        _ = c.close(sockets[0]);
-        emulator.join();
-        return failure;
-    } };
-    if (control.run(
-        .{ .automatic_ear_detection = exchange.action },
-        deadline_ms,
-    ) catch null) |result| exchange_result.result = result.automatic_ear_detection;
-    if (exchange.action != .status) {
-        exchange_result.follow_up = (try control.run(
-            .{ .automatic_ear_detection = .status },
-            deadline_ms,
-        )).automatic_ear_detection;
-    }
-    emulator.join();
-    _ = c.close(sockets[0]);
-
-    try std.testing.expectEqual(@as(u8, 0), context.status);
-    return exchange_result;
 }
 
 fn sendOwnership(fd: c_int, owns: bool) bool {
@@ -755,19 +664,13 @@ test "one initialized controller serves sequential cached operations" {
 }
 
 test "generic control-command framing is exact and bounded" {
-    const expected = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0a, 0x01, 0x00, 0x00, 0x00 };
-    const encoded = try control_command.encode(0x0a, &.{0x01});
-    const disabled = try control_command.encode(0x0a, &.{0x02});
+    const expected = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x22, 0x01, 0x02, 0x00, 0x00 };
+    const encoded = try control_command.encode(0x22, &.{ 0x01, 0x02 });
     const parsed = (try control_command.parsePacket(&encoded)).?;
 
     try std.testing.expectEqualSlices(u8, &expected, &encoded);
-    try std.testing.expectEqualSlices(
-        u8,
-        &.{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0a, 0x02, 0x00, 0x00, 0x00 },
-        &disabled,
-    );
-    try std.testing.expectEqual(@as(u8, 0x0a), parsed.identifier);
-    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x00, 0x00, 0x00 }, &parsed.values);
+    try std.testing.expectEqual(@as(u8, 0x22), parsed.identifier);
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x02, 0x00, 0x00 }, &parsed.values);
     try std.testing.expectError(error.TooMuchData, control_command.encode(1, &.{ 1, 2, 3, 4, 5 }));
 
     for (0..4) |length| try std.testing.expect((try control_command.parsePacket(expected[0..length])) == null);
@@ -784,62 +687,41 @@ test "generic control-command framing is exact and bounded" {
     try std.testing.expectEqual(@as(u8, 0xfe), (try control_command.parsePacket(&unknown_identifier)).?.identifier);
 }
 
-test "automatic ear detection setting and wear packets are typed" {
-    var setting_packet = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x09, 0x00, 0x0a, 0x01, 0x00, 0x00, 0x00 };
-    const on_state = (try control_command.parsePacket(&setting_packet)).?;
-
-    try std.testing.expectEqual(ear_detection.Setting.on, (try ear_detection.parseSetting(on_state)).?);
-    setting_packet[7] = 2;
-    try std.testing.expectEqual(
-        ear_detection.Setting.off,
-        (try ear_detection.parseSetting((try control_command.parsePacket(&setting_packet)).?)).?,
-    );
-    setting_packet[8] = 1;
-    try std.testing.expectError(
-        error.InvalidSettingPacket,
-        ear_detection.parseSetting((try control_command.parsePacket(&setting_packet)).?),
-    );
-    setting_packet[8] = 0;
-    setting_packet[7] = 0xff;
-    try std.testing.expectError(
-        error.InvalidSettingPacket,
-        ear_detection.parseSetting((try control_command.parsePacket(&setting_packet)).?),
-    );
-
+test "wear packets are typed" {
     const wear_packet = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x02 };
-    const wear = (try ear_detection.parseWearPacket(&wear_packet)).?;
-    try std.testing.expectEqual(ear_detection.WearState.in_ear, wear.primary);
-    try std.testing.expectEqual(ear_detection.WearState.in_case, wear.secondary);
+    const wear = (try wear_detection.parseWearPacket(&wear_packet)).?;
+    try std.testing.expectEqual(wear_detection.WearState.in_ear, wear.primary);
+    try std.testing.expectEqual(wear_detection.WearState.in_case, wear.secondary);
     try std.testing.expectEqual(@as(?u8, 1), wear.inEarCount());
 
     var unknown_wear = wear_packet;
     unknown_wear[7] = 0xfe;
-    const unknown = (try ear_detection.parseWearPacket(&unknown_wear)).?;
+    const unknown = (try wear_detection.parseWearPacket(&unknown_wear)).?;
     try std.testing.expectEqualStrings("unknown", unknown.secondary.name());
     try std.testing.expectEqual(@as(?u8, null), unknown.inEarCount());
     for (0..3) |value| {
         var primary = wear_packet;
         primary[6] = @intCast(value);
-        try std.testing.expectEqual(@as(ear_detection.WearState, @enumFromInt(value)), (try ear_detection.parseWearPacket(&primary)).?.primary);
+        try std.testing.expectEqual(@as(wear_detection.WearState, @enumFromInt(value)), (try wear_detection.parseWearPacket(&primary)).?.primary);
         var secondary = wear_packet;
         secondary[7] = @intCast(value);
-        try std.testing.expectEqual(@as(ear_detection.WearState, @enumFromInt(value)), (try ear_detection.parseWearPacket(&secondary)).?.secondary);
+        try std.testing.expectEqual(@as(wear_detection.WearState, @enumFromInt(value)), (try wear_detection.parseWearPacket(&secondary)).?.secondary);
     }
-    for (0..4) |length| try std.testing.expect((try ear_detection.parseWearPacket(wear_packet[0..length])) == null);
+    for (0..4) |length| try std.testing.expect((try wear_detection.parseWearPacket(wear_packet[0..length])) == null);
     for (4..wear_packet.len) |length| {
-        try std.testing.expectError(error.InvalidWearPacket, ear_detection.parseWearPacket(wear_packet[0..length]));
+        try std.testing.expectError(error.InvalidWearPacket, wear_detection.parseWearPacket(wear_packet[0..length]));
     }
     const oversized_wear = wear_packet ++ [_]u8{0};
-    try std.testing.expectError(error.InvalidWearPacket, ear_detection.parseWearPacket(&oversized_wear));
+    try std.testing.expectError(error.InvalidWearPacket, wear_detection.parseWearPacket(&oversized_wear));
     var reserved_wear = wear_packet;
     reserved_wear[5] = 1;
-    try std.testing.expectError(error.InvalidWearPacket, ear_detection.parseWearPacket(&reserved_wear));
+    try std.testing.expectError(error.InvalidWearPacket, wear_detection.parseWearPacket(&reserved_wear));
     var unrelated_wear = wear_packet;
     unrelated_wear[0] = 0xff;
-    try std.testing.expect((try ear_detection.parseWearPacket(&unrelated_wear)) == null);
+    try std.testing.expect((try wear_detection.parseWearPacket(&unrelated_wear)) == null);
     unrelated_wear = wear_packet;
     unrelated_wear[4] = 0x04;
-    try std.testing.expect((try ear_detection.parseWearPacket(&unrelated_wear)) == null);
+    try std.testing.expect((try wear_detection.parseWearPacket(&unrelated_wear)) == null);
 }
 
 test "smart-routing packets are exact and bounded" {
@@ -1032,92 +914,42 @@ test "manual switching ownership adopts the first playback baseline" {
     try std.testing.expectEqual(switching_policy.Action.release, policy.tick(60_002));
 }
 
-test "automatic ear detection status is observed and setters are explicit writes" {
-    const exchanges = [_]EarExchange{
-        .{ .action = .status, .current = .on, .target = .on },
-        .{ .action = .on, .current = .off, .target = .on },
-        .{ .action = .on, .target = .on },
-        .{ .action = .off, .current = .on, .target = .off },
-    };
-
-    for (&exchanges) |*exchange| {
-        const result = try runEarExchange(exchange);
-        try std.testing.expectEqual(switch (exchange.action) {
-            .status => ear_detection.Outcome.confirmed(exchange.current.?),
-            .on, .off => ear_detection.Outcome.requested(exchange.target),
-        }, result.result.?);
-        try std.testing.expectEqual(if (exchange.action == .status)
-            @as(?ear_detection.Outcome, null)
-        else
-            ear_detection.Outcome.requested(exchange.target), result.follow_up);
-        try std.testing.expectEqual(@as(usize, 0), result.failure.text().len);
-    }
-
-    const unknown = try runEarExchange(&.{ .action = .status, .target = .on });
-    try std.testing.expectEqual(ear_detection.Outcome.unknown, unknown.result.?);
-    try std.testing.expectEqual(@as(usize, 0), unknown.failure.text().len);
-}
-
-test "automatic ear detection CLI and IPC variants are explicit" {
-    const status = cli.parseInvocation(&.{ "airpodsctl", "automatic-ear-detection", "status" });
+test "wear status CLI and IPC variants are explicit" {
     const wear = cli.parseInvocation(&.{ "airpodsctl", "--session", "wear-status" });
     const serve = cli.parseInvocation(&.{ "airpodsctl", "serve", "--pause-on-removal=both" });
     var packet: [512]u8 = undefined;
 
-    try std.testing.expect(status == .execute);
-    try std.testing.expectEqual(ear_detection.Action.status, status.execute.operation.automatic_ear_detection);
     try std.testing.expect(wear.execute.operation == .wear_status);
     try std.testing.expectEqual(cli.Backend.session, wear.execute.backend);
     try std.testing.expectEqual(operations.PauseOnRemoval.both, serve.serve.pause_on_removal);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "status", "--pause-on-removal=one" }) == .usage);
-    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "automatic-ear-detection", "toggle" }) == .usage);
 
-    const encoded = try ipc.encodeRequest(&packet, status.execute);
-    try std.testing.expectEqualStrings("APC4", encoded[0..4]);
+    const encoded = try ipc.encodeRequest(&packet, wear.execute);
+    try std.testing.expectEqualStrings("APC2", encoded[0..4]);
     const decoded = try ipc.decodeRequest(encoded);
-    try std.testing.expectEqual(ipc.ProtocolVersion.v4, decoded.version);
-    try std.testing.expectEqual(ear_detection.Action.status, decoded.operation.automatic_ear_detection);
-
-    var legacy_request: [512]u8 = undefined;
-    @memcpy(legacy_request[0..encoded.len], encoded);
-    @memcpy(legacy_request[0..4], "APC2");
-    try std.testing.expectError(error.InvalidRequest, ipc.decodeRequest(legacy_request[0..encoded.len]));
+    try std.testing.expectEqual(ipc.ProtocolVersion.v2, decoded.version);
+    try std.testing.expect(decoded.operation == .wear_status);
 
     var failure = support.ErrorMessage{};
-    const decoded_setting = try ipc.decodeResult(
-        ipc.encodeResult(&packet, .{ .automatic_ear_detection = .off }),
-        &failure,
-    );
-    try std.testing.expectEqual(ear_detection.Outcome.off, decoded_setting.automatic_ear_detection);
-    const decoded_unknown = try ipc.decodeResult(
-        ipc.encodeResult(&packet, .{ .automatic_ear_detection = .unknown }),
-        &failure,
-    );
-    try std.testing.expectEqual(ear_detection.Outcome.unknown, decoded_unknown.automatic_ear_detection);
-    const decoded_request = try ipc.decodeResult(
-        ipc.encodeResult(&packet, .{ .automatic_ear_detection = .requested_on }),
-        &failure,
-    );
-    try std.testing.expectEqual(ear_detection.Outcome.requested_on, decoded_request.automatic_ear_detection);
     const decoded_wear = try ipc.decodeResult(ipc.encodeResult(&packet, .{ .wear_status = .{
         .primary = .in_ear,
         .secondary = .out_of_ear,
     } }), &failure);
-    try std.testing.expectEqual(ear_detection.WearState.out_of_ear, decoded_wear.wear_status.secondary);
+    try std.testing.expectEqual(wear_detection.WearState.out_of_ear, decoded_wear.wear_status.secondary);
 
     _ = ipc.encodeFailureForVersion(&packet, "unsupported operation", .v1);
     try std.testing.expectError(
         error.IncompatibleVersion,
-        ipc.decodeResultForVersion(packet[0 .. 7 + "unsupported operation".len], .v4, &failure),
+        ipc.decodeResultForVersion(packet[0 .. 7 + "unsupported operation".len], .v2, &failure),
     );
     try std.testing.expect(std.mem.indexOf(u8, failure.text(), "restart") != null);
 }
 
 test "wear policy baselines snapshots, transitions, and resets conservatively" {
-    const both_in = ear_detection.WearReport{ .primary = .in_ear, .secondary = .in_ear };
-    const one_in = ear_detection.WearReport{ .primary = .in_ear, .secondary = .out_of_ear };
-    const none_in = ear_detection.WearReport{ .primary = .out_of_ear, .secondary = .in_case };
-    const unknown = ear_detection.WearReport{
+    const both_in = wear_detection.WearReport{ .primary = .in_ear, .secondary = .in_ear };
+    const one_in = wear_detection.WearReport{ .primary = .in_ear, .secondary = .out_of_ear };
+    const none_in = wear_detection.WearReport{ .primary = .out_of_ear, .secondary = .in_case };
+    const unknown = wear_detection.WearReport{
         .primary = .in_ear,
         .secondary = @enumFromInt(0xfe),
     };

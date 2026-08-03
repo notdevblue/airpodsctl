@@ -1,7 +1,6 @@
 const std = @import("std");
 const battery = @import("battery");
 const command = @import("command");
-const ear_detection = @import("ear_detection");
 const noise_control = @import("noise_control");
 const switching_policy = @import("switching_policy");
 
@@ -9,7 +8,6 @@ pub const usage =
     \\Usage: airpodsctl [--device MAC] COMMAND
     \\       airpodsctl [--device MAC] toggle [MODE...]
     \\       airpodsctl [--device MAC] battery [COMPONENT]
-    \\       airpodsctl [--device MAC] automatic-ear-detection status|on|off
     \\       airpodsctl [--device MAC] wear-status
     \\       airpodsctl [--device MAC] switching status|release
     \\       airpodsctl [--device MAC] switching take [--force]
@@ -25,8 +23,6 @@ pub const usage =
     \\                Cycle through MODEs in order (defaults to anc off)
     \\  battery [COMPONENT]
     \\                Print all battery readings or one percentage
-    \\  automatic-ear-detection status|on|off
-    \\                Read or change the AirPods device preference
     \\  wear-status   Print the latest primary and secondary wear state
     \\  switching status|take|release
     \\                Inspect or change multipoint audio ownership
@@ -235,15 +231,6 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
                 battery.Component.parse(positional[1]) orelse return .usage
             else
                 null },
-        } };
-    }
-    if (std.mem.eql(u8, positional[0], "automatic-ear-detection")) {
-        if (positional_count != 2) return .usage;
-        return .{ .execute = .{
-            .requested_address = requested_address,
-            .backend = backend,
-            .operation = .{ .automatic_ear_detection = ear_detection.Action.parse(positional[1]) orelse
-                return .usage },
         } };
     }
     if (std.mem.eql(u8, positional[0], "wear-status")) {
