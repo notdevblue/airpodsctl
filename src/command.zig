@@ -44,7 +44,7 @@ pub const BatteryResult = struct {
 pub const Result = union(enum) {
     mode: noise_control.Mode,
     battery: BatteryResult,
-    automatic_ear_detection: ear_detection.Setting,
+    automatic_ear_detection: ear_detection.Outcome,
     wear_status: ear_detection.WearReport,
     switching: smart_routing.Status,
 };

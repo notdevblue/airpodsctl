@@ -18,7 +18,8 @@ fn waitForFd(
     events: c_short,
     deadline_ms: i64,
     failure: *support.ErrorMessage,
-) Error!void {
+    timeout_is_failure: bool,
+) Error!bool {
     var descriptor = c.struct_pollfd{ .fd = fd, .events = events, .revents = 0 };
 
     while (true) {
@@ -29,6 +30,8 @@ fn waitForFd(
             std.math.maxInt(c_int),
         ));
         if (timeout == 0) {
+            if (!timeout_is_failure) return false;
+
             failure.set("AirPods did not respond before the timeout", .{});
             return error.ProtocolFailure;
         }
@@ -39,7 +42,7 @@ fn waitForFd(
                 failure.set("AirPods transport reported an I/O error", .{});
                 return error.ProtocolFailure;
             }
-            if (descriptor.revents & events != 0) return;
+            if (descriptor.revents & events != 0) return true;
             if (descriptor.revents & c.POLLHUP != 0) {
                 failure.set("AirPods closed the control connection", .{});
                 return error.ProtocolFailure;
@@ -47,6 +50,8 @@ fn waitForFd(
             continue;
         }
         if (ready == 0) {
+            if (!timeout_is_failure) return false;
+
             failure.set("AirPods did not respond before the timeout", .{});
             return error.ProtocolFailure;
         }
@@ -82,7 +87,7 @@ pub const Channel = struct {
 
     pub fn send(self: *Channel, packet: []const u8) Error!void {
         while (true) {
-            try waitForFd(self.fd, c.POLLOUT, self.deadline_ms, self.failure);
+            _ = try waitForFd(self.fd, c.POLLOUT, self.deadline_ms, self.failure, true);
 
             const sent = c.send(self.fd, packet.ptr, packet.len, c.MSG_NOSIGNAL);
             if (sent == packet.len) return;
@@ -109,7 +114,7 @@ pub const Channel = struct {
         message.msg_iovlen = 1;
 
         while (true) {
-            try waitForFd(self.fd, c.POLLIN, self.deadline_ms, self.failure);
+            _ = try waitForFd(self.fd, c.POLLIN, self.deadline_ms, self.failure, true);
 
             const received = c.recvmsg(self.fd, &message, 0);
             if (received > 0) {
@@ -131,5 +136,15 @@ pub const Channel = struct {
                 return error.ProtocolFailure;
             }
         }
+    }
+
+    pub fn waitReadableUntil(self: *Channel, deadline_ms: i64) Error!bool {
+        return waitForFd(
+            self.fd,
+            c.POLLIN,
+            @min(deadline_ms, self.deadline_ms),
+            self.failure,
+            false,
+        );
     }
 };

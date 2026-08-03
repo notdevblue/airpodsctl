@@ -80,9 +80,8 @@ const PersistentEmulatorContext = struct {
 
 const EarExchange = struct {
     action: ear_detection.Action,
-    current: ear_detection.Setting,
+    current: ?ear_detection.Setting = null,
     target: ear_detection.Setting,
-    mismatch: bool = false,
 };
 
 const EarEmulatorContext = struct {
@@ -92,13 +91,9 @@ const EarEmulatorContext = struct {
 };
 
 const EarExchangeResult = struct {
-    result: ?ear_detection.Setting,
-    observed_wear_events: usize,
+    result: ?ear_detection.Outcome,
+    follow_up: ?ear_detection.Outcome,
     failure: support.ErrorMessage,
-};
-
-const EarObserverContext = struct {
-    wear_events: usize = 0,
 };
 
 const RoutingExchange = struct {
@@ -302,23 +297,25 @@ fn emulateEarExchange(fd: c_int, exchange: *const EarExchange) u8 {
         0x04,                          0x00, 0x04, 0x00, 0x09, 0x00, 0x0a,
         @intFromEnum(exchange.target), 0x00, 0x00, 0x00,
     };
-    const wear_packet = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x01 };
+    if (!receiveInitialization(fd)) return 1;
+    if (exchange.current) |current| {
+        if (!sendSetting(fd, current)) return 2;
+    }
+    if (exchange.action == .status) {
+        if (exchange.current != null) return 0;
 
-    if (!receiveInitialization(fd) or !sendSetting(fd, exchange.current)) return 1;
-    if (exchange.action == .status) return 0;
+        // Keep the transport valid beyond the controller's bounded observation window.
+        var delay = c.struct_timespec{ .tv_sec = 0, .tv_nsec = 300_000_000 };
+        _ = c.nanosleep(&delay, null);
+        return 0;
+    }
     if (!receiveExpected(fd, &command_packet)) return 2;
-    if (c.send(fd, &wear_packet, wear_packet.len, 0) != wear_packet.len) return 3;
-    return if (sendSetting(fd, if (exchange.mismatch) exchange.current else exchange.target)) 0 else 4;
+    return 0;
 }
 
 fn runEarEmulator(context: *EarEmulatorContext) void {
     context.status = emulateEarExchange(context.fd, context.exchange);
     _ = c.close(context.fd);
-}
-
-fn observeEarEvent(context: ?*anyopaque, event: controller.Event) void {
-    const observer: *EarObserverContext = @ptrCast(@alignCast(context.?));
-    if (event == .wear) observer.wear_events += 1;
 }
 
 fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
@@ -329,11 +326,10 @@ fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
     const emulator = try std.Thread.spawn(.{}, runEarEmulator, .{&context});
     var exchange_result = EarExchangeResult{
         .result = null,
-        .observed_wear_events = 0,
+        .follow_up = null,
         .failure = .{},
     };
     const deadline_ms = transport.nowMs() + 1000;
-    var observer = EarObserverContext{};
     var control = controller.Controller{ .session = aacp.Session.initialize(
         sockets[0],
         deadline_ms,
@@ -344,14 +340,18 @@ fn runEarExchange(exchange: *const EarExchange) !EarExchangeResult {
         emulator.join();
         return failure;
     } };
-    if (control.runWithObserver(
+    if (control.run(
         .{ .automatic_ear_detection = exchange.action },
         deadline_ms,
-        .{ .context = &observer, .callback = observeEarEvent },
     ) catch null) |result| exchange_result.result = result.automatic_ear_detection;
-    exchange_result.observed_wear_events = observer.wear_events;
-    _ = c.close(sockets[0]);
+    if (exchange.action != .status) {
+        exchange_result.follow_up = (try control.run(
+            .{ .automatic_ear_detection = .status },
+            deadline_ms,
+        )).automatic_ear_detection;
+    }
     emulator.join();
+    _ = c.close(sockets[0]);
 
     try std.testing.expectEqual(@as(u8, 0), context.status);
     return exchange_result;
@@ -1032,29 +1032,30 @@ test "manual switching ownership adopts the first playback baseline" {
     try std.testing.expectEqual(switching_policy.Action.release, policy.tick(60_002));
 }
 
-test "automatic ear detection exchanges require a newer matching acknowledgement" {
+test "automatic ear detection status is observed and setters are explicit writes" {
     const exchanges = [_]EarExchange{
         .{ .action = .status, .current = .on, .target = .on },
         .{ .action = .on, .current = .off, .target = .on },
-        .{ .action = .on, .current = .on, .target = .on },
+        .{ .action = .on, .target = .on },
         .{ .action = .off, .current = .on, .target = .off },
     };
 
     for (&exchanges) |*exchange| {
         const result = try runEarExchange(exchange);
-        try std.testing.expectEqual(exchange.target, result.result.?);
-        try std.testing.expectEqual(@as(usize, if (exchange.action == .status) 0 else 1), result.observed_wear_events);
+        try std.testing.expectEqual(switch (exchange.action) {
+            .status => ear_detection.Outcome.confirmed(exchange.current.?),
+            .on, .off => ear_detection.Outcome.requested(exchange.target),
+        }, result.result.?);
+        try std.testing.expectEqual(if (exchange.action == .status)
+            @as(?ear_detection.Outcome, null)
+        else
+            ear_detection.Outcome.requested(exchange.target), result.follow_up);
         try std.testing.expectEqual(@as(usize, 0), result.failure.text().len);
     }
 
-    const mismatch = try runEarExchange(&.{
-        .action = .on,
-        .current = .off,
-        .target = .on,
-        .mismatch = true,
-    });
-    try std.testing.expect(mismatch.result == null);
-    try std.testing.expect(std.mem.indexOf(u8, mismatch.failure.text(), "did not acknowledge") != null);
+    const unknown = try runEarExchange(&.{ .action = .status, .target = .on });
+    try std.testing.expectEqual(ear_detection.Outcome.unknown, unknown.result.?);
+    try std.testing.expectEqual(@as(usize, 0), unknown.failure.text().len);
 }
 
 test "automatic ear detection CLI and IPC variants are explicit" {
@@ -1072,17 +1073,32 @@ test "automatic ear detection CLI and IPC variants are explicit" {
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "automatic-ear-detection", "toggle" }) == .usage);
 
     const encoded = try ipc.encodeRequest(&packet, status.execute);
-    try std.testing.expectEqualStrings("APC2", encoded[0..4]);
+    try std.testing.expectEqualStrings("APC4", encoded[0..4]);
     const decoded = try ipc.decodeRequest(encoded);
-    try std.testing.expectEqual(ipc.ProtocolVersion.v2, decoded.version);
+    try std.testing.expectEqual(ipc.ProtocolVersion.v4, decoded.version);
     try std.testing.expectEqual(ear_detection.Action.status, decoded.operation.automatic_ear_detection);
+
+    var legacy_request: [512]u8 = undefined;
+    @memcpy(legacy_request[0..encoded.len], encoded);
+    @memcpy(legacy_request[0..4], "APC2");
+    try std.testing.expectError(error.InvalidRequest, ipc.decodeRequest(legacy_request[0..encoded.len]));
 
     var failure = support.ErrorMessage{};
     const decoded_setting = try ipc.decodeResult(
         ipc.encodeResult(&packet, .{ .automatic_ear_detection = .off }),
         &failure,
     );
-    try std.testing.expectEqual(ear_detection.Setting.off, decoded_setting.automatic_ear_detection);
+    try std.testing.expectEqual(ear_detection.Outcome.off, decoded_setting.automatic_ear_detection);
+    const decoded_unknown = try ipc.decodeResult(
+        ipc.encodeResult(&packet, .{ .automatic_ear_detection = .unknown }),
+        &failure,
+    );
+    try std.testing.expectEqual(ear_detection.Outcome.unknown, decoded_unknown.automatic_ear_detection);
+    const decoded_request = try ipc.decodeResult(
+        ipc.encodeResult(&packet, .{ .automatic_ear_detection = .requested_on }),
+        &failure,
+    );
+    try std.testing.expectEqual(ear_detection.Outcome.requested_on, decoded_request.automatic_ear_detection);
     const decoded_wear = try ipc.decodeResult(ipc.encodeResult(&packet, .{ .wear_status = .{
         .primary = .in_ear,
         .secondary = .out_of_ear,
@@ -1092,7 +1108,7 @@ test "automatic ear detection CLI and IPC variants are explicit" {
     _ = ipc.encodeFailureForVersion(&packet, "unsupported operation", .v1);
     try std.testing.expectError(
         error.IncompatibleVersion,
-        ipc.decodeResultForVersion(packet[0 .. 7 + "unsupported operation".len], .v2, &failure),
+        ipc.decodeResultForVersion(packet[0 .. 7 + "unsupported operation".len], .v4, &failure),
     );
     try std.testing.expect(std.mem.indexOf(u8, failure.text(), "restart") != null);
 }

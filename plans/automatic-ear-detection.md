@@ -1,6 +1,6 @@
 # Automatic ear detection and wear-aware media control
 
-Status: implemented provisionally. The command surface, packet codecs, controller state/events, wear policy, PipeWire route gate, and MPRIS integration are present, but the hardware and desktop acceptance matrix below remains outstanding.
+Status: implemented provisionally. The command surface, packet codecs, controller state/events, wear policy, PipeWire route gate, and MPRIS integration are present, but the hardware and desktop acceptance matrix below remains outstanding. Live testing confirmed wear-aware pause and resume. AACP initialization did not provide a `0x0a` setting snapshot, and neither an enabled nor disabled write produced a state acknowledgement; status therefore distinguishes unknown, confirmed observations, and connection-scoped unconfirmed write outcomes.
 
 This document separates two features that are often both called automatic ear detection:
 
@@ -47,7 +47,9 @@ Automatic Ear Detection uses identifier `0x0a` and one meaningful value byte:
 | Enabled | `0x01` | `04 00 04 00 09 00 0a 01 00 00 00` |
 | Disabled | `0x02` | `04 00 04 00 09 00 0a 02 00 00 00` |
 
-LibrePods Android sends this command from `AirPodsViewModel.setAutomaticEarDetectionEnabled` through its generic control-command builder. Its sender updates a local cache before writing the packet, so that cache is not proof that the AirPods accepted the value. `airpodsctl` must retain its existing acknowledgement standard: a successful setter should require a newer matching event from the AirPods whenever the protocol provides one.
+LibrePods Android sends this command from `AirPodsViewModel.setAutomaticEarDetectionEnabled` through its generic control-command builder. Its sender updates a local cache before writing the packet, so that cache is not proof that the AirPods accepted the value. Live `airpodsctl` tests sent both values but received no corresponding state event. The public setter is therefore write-only: `requested-on` or `requested-off` means the packet reached the Bluetooth transport, not that the resulting device state was confirmed.
+
+No separate read command for identifier `0x0a` has been identified. The notification subscription used during AACP initialization did not produce this state in the tested live session. Absence of that notification cannot distinguish enabled from disabled, so a controller reports `on` or `off` only for an observed setting, `requested-on` or `requested-off` for a write made on the current connection, and `unknown` when it has neither source.
 
 ### Wear-state notification
 
@@ -70,10 +72,10 @@ The final two bytes identify the primary and secondary earbuds, not permanently 
 
 ## Protocol questions to validate on hardware
 
-Implementation may begin with pure packet parsing, but the public getter and acknowledged setter require live answers to these questions:
+The tested AirPods Pro 2 firmware did not report an initial setting or acknowledge either write. The remaining hardware questions are:
 
-1. Does AACP initialization report the current `0x0a` control state without first changing it?
-2. Does setting `0x0a` produce a matching control-command event that can acknowledge the write?
+1. Do other AirPods models or firmware versions report the current `0x0a` control state during AACP initialization?
+2. Do other models or firmware versions acknowledge a `0x0a` write with a matching control-command event?
 3. Does the value persist across an AACP reconnect, Bluetooth reconnect, case sleep cycle, and connection to an Apple device?
 4. Does disabling Automatic Ear Detection stop opcode `0x0006` notifications, or does it only change how a host is expected to react to them?
 5. Does the notification-subscription mask need to change when the setting is disabled or re-enabled?
@@ -89,9 +91,9 @@ Keep device configuration, observed state, and host automation explicit:
 
 ```console
 $ airpodsctl automatic-ear-detection status
-on
+unknown
 $ airpodsctl automatic-ear-detection off
-off
+requested-off
 $ airpodsctl wear-status
 primary in-ear
 secondary out-of-ear
@@ -100,13 +102,13 @@ $ airpodsctl serve --pause-on-removal=one
 
 The final command spelling should be reviewed with the broader settings interface before implementation. Required semantics are:
 
-- `automatic-ear-detection status|on|off` reads or changes the AirPods-side setting.
+- `automatic-ear-detection status|on|off` reports the last setting announced during the current connection, or sends an unconfirmed AirPods-side setting request. Status reports current-connection request provenance when no newer observation exists and is `unknown` when neither exists; setters return `requested-on` or `requested-off` after transport delivery.
 - `wear-status` reports the most recent AACP wear state without implying that primary means left.
 - `--pause-on-removal=one|both|off` configures host media behavior for the persistent service.
 - One-shot commands may read or change state, but must not remain alive to automate media.
 - Media automation must be opt-in until its active-output detection and desktop compatibility have been validated.
 
-Turning the device setting off should disable host automation by default because users reasonably expect that switch to stop automatic playback changes. If an explicit host-policy override is desired, it must be designed and documented rather than happening accidentally.
+The explicitly configured host automation remains independent of the device setting. Gating `--pause-on-removal` on a value that is commonly unavailable would silently disable the policy, while treating absence as enabled would invent state. Users control Linux playback behavior through `--pause-on-removal=one|both|off` and the AirPods preference through `automatic-ear-detection`.
 
 ## Required architecture
 
@@ -152,7 +154,7 @@ The modules must remain pure packet logic. They must not format CLI output, call
 The central controller remains the owner of current AirPods state. Extend it with:
 
 - The most recently confirmed Automatic Ear Detection setting.
-- A generation counter for setting acknowledgements.
+- A generation counter for distinguishing newer setting observations.
 - Primary and secondary wear states.
 - A wear-state generation counter.
 - Whether an initial wear snapshot has been received for the current AACP session.
@@ -161,20 +163,19 @@ The central controller remains the owner of current AirPods state. Extend it wit
 
 The controller must not invoke media operations. Keeping side effects in the service ensures one-shot commands remain one-shot and prevents packet tests from requiring a desktop session bus.
 
-### Device getter and setter
+### Device status and setter
 
-The getter should wait for a confirmed `0x0a` state received from the AirPods. It must not report a compiled default or a value remembered only by the current process.
+Status should briefly consume already-arriving notifications after initialization and then report the `0x0a` state cached for the current AACP connection. An AirPods notification produces confirmed `on` or `off`; a later local write produces `requested-on` or `requested-off`; and the absence of either produces `unknown` without disconnecting the otherwise healthy session. It must not report a compiled default, infer a value from missing notifications, or persist request provenance across a reconnect.
 
-The setter should:
+The write-only setter should:
 
-1. Ensure the current setting is known if the acknowledgement protocol depends on generation comparison.
-2. Record the previous setting generation.
-3. Send the `0x0a` control command.
-4. Continue consuming all AACP notifications until a newer matching `0x0a` state arrives.
-5. Report the confirmed value.
-6. Fail with a specific acknowledgement error if a newer conflicting value arrives or the shared deadline expires.
+1. Derive the explicit target from `on` or `off` without requiring a current setting.
+2. Send the `0x0a` control command within the shared operation deadline.
+3. Return `requested-on` or `requested-off` only after the packet reaches the Bluetooth transport.
+4. Replace any older observed value with connection-scoped request provenance because the write makes that observation stale.
+5. Upgrade the outcome to confirmed `on` or `off` only if a later AirPods notification independently reports the setting.
 
-If hardware testing proves that AirPods do not acknowledge this control command, the CLI must not pretend that transport success is state confirmation. In that case, either expose the operation explicitly as write-only with documented semantics or defer the setter until a reliable confirmation mechanism is known.
+The CLI must not collapse a requested result into observed `on` or `off`. A future firmware-specific acknowledgement may upgrade the outcome only after hardware captures and tests establish that behavior reliably.
 
 ### Wear policy
 
@@ -250,6 +251,8 @@ Changing the card profile is more invasive than pausing media. It may add reconn
 
 New operations and results must be encoded as explicit IPC variants. Review the current protocol version before assigning values, and test mixed client/service versions so an older process produces a clear incompatibility error rather than interpreting a new operation as another command.
 
+Automatic Ear Detection originally shared IPC v2 with wear status and returned only `on` or `off`. Its `unknown`, `requested-on`, and `requested-off` outcomes use IPC v4 so an already-running service cannot silently reinterpret the changed response contract. Wear status remains on v2 and switching remains on v3.
+
 Wear-state events do not need to be streamed to ordinary clients for the first implementation. The persistent service can consume them internally while `wear-status` returns the latest cached snapshot. A future watch or subscription interface should use a separately versioned IPC design with backpressure and disconnect behavior.
 
 ## Service lifecycle and failure behavior
@@ -277,7 +280,7 @@ Required behavior includes:
    - Add controller state and generation tracking for incoming control values.
 3. Automatic Ear Detection operation:
    - Add the typed `0x0a` setting.
-   - Implement direct and session getter/setter behavior with confirmed acknowledgements.
+   - Implement direct and session status/setter behavior with explicit unknown status and unconfirmed write outcomes.
    - Extend CLI, IPC, help, and README documentation.
 4. Wear-state support:
    - Add the opcode `0x0006` parser and fixtures.
@@ -303,7 +306,7 @@ Protocol tests must cover:
 - Exact enabled and disabled control-command encodings.
 - Truncated control commands at every byte boundary.
 - Unknown identifiers, oversized values, and nonzero reserved bytes.
-- Matching, conflicting, duplicate, and stale setting acknowledgements.
+- Missing initial status, observed setting notifications, and exact enabled and disabled write-only outcomes.
 - Exact wear-state packet parsing.
 - Every known status value in both byte positions.
 - Truncated, oversized, wrong-prefix, and unknown-status packets.

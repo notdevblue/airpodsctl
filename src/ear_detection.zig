@@ -20,6 +20,38 @@ pub const Setting = enum(u8) {
     }
 };
 
+pub const Outcome = enum(u8) {
+    unknown = 0,
+    on = 1,
+    off = 2,
+    requested_on = 3,
+    requested_off = 4,
+
+    pub fn confirmed(setting: Setting) Outcome {
+        return switch (setting) {
+            .on => .on,
+            .off => .off,
+        };
+    }
+
+    pub fn requested(setting: Setting) Outcome {
+        return switch (setting) {
+            .on => .requested_on,
+            .off => .requested_off,
+        };
+    }
+
+    pub fn name(self: Outcome) []const u8 {
+        return switch (self) {
+            .unknown => "unknown",
+            .on => "on",
+            .off => "off",
+            .requested_on => "requested-on",
+            .requested_off => "requested-off",
+        };
+    }
+};
+
 pub const Action = enum {
     status,
     on,
@@ -90,14 +122,6 @@ pub fn parseWearPacket(packet: []const u8) error{InvalidWearPacket}!?WearReport 
     return .{
         .primary = @enumFromInt(packet[6]),
         .secondary = @enumFromInt(packet[7]),
-    };
-}
-
-pub fn targetSetting(action: Action, current: Setting) Setting {
-    return switch (action) {
-        .status => current,
-        .on => .on,
-        .off => .off,
     };
 }
 

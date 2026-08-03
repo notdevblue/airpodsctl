@@ -73,8 +73,8 @@ fn writeResult(result: operations.Result) void {
             writeBatteryLine(.left, value.report.left);
             writeBatteryLine(.right, value.report.right);
         },
-        .automatic_ear_detection => |setting| {
-            writeAll(support.c.STDOUT_FILENO, setting.name());
+        .automatic_ear_detection => |status| {
+            writeAll(support.c.STDOUT_FILENO, status.name());
             writeAll(support.c.STDOUT_FILENO, "\n");
         },
         .wear_status => |report| {

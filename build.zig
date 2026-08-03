@@ -98,6 +98,7 @@ pub fn build(builder: *std.Build) void {
     controller_module.addImport("ear_detection", ear_detection_module);
     controller_module.addImport("noise_control", noise_control_module);
     controller_module.addImport("smart_routing", smart_routing_module);
+    controller_module.addImport("transport", transport_module);
 
     const cli_module = builder.createModule(.{
         .root_source_file = builder.path("src/cli.zig"),
