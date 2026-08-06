@@ -50,12 +50,12 @@ fn loggedEvent(event: Event) Event {
         .battery => |report| {
             if (report.left) |reading| support.log(
                 .debug,
-                "The left earbud reports {d}% and {s} because its battery notification was valid.",
+                "The left earbud reports {d}% and {s}.",
                 .{ reading.level, reading.state.name() },
             );
             if (report.right) |reading| support.log(
                 .debug,
-                "The right earbud reports {d}% and {s} because its battery notification was valid.",
+                "The right earbud reports {d}% and {s}.",
                 .{ reading.level, reading.state.name() },
             );
         },

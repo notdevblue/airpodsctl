@@ -126,7 +126,7 @@ fn execute(command: cli.Command) u8 {
         return 1;
     };
 
-    support.log(.debug, "The '{s}' operation completed because its response was validated successfully.", .{command.operation.name()});
+    support.log(.debug, "The '{s}' operation completed successfully.", .{command.operation.name()});
     writeResult(result);
 
     return 0;
