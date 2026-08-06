@@ -44,7 +44,7 @@ fn loggedEvent(event: Event) Event {
     switch (event) {
         .listening_mode => |mode| support.log(
             .debug,
-            "The listening mode is now '{s}' because the AirPods sent a valid control-command notification.",
+            "The listening mode is now '{s}'.",
             .{mode.name()},
         ),
         .battery => |report| {
@@ -61,12 +61,12 @@ fn loggedEvent(event: Event) Event {
         },
         .wear => |report| support.log(
             .debug,
-            "The wear state is primary '{s}', secondary '{s}' because the AirPods sent a valid wear notification.",
+            "The wear state is primary '{s}', secondary '{s}'.",
             .{ report.primary.name(), report.secondary.name() },
         ),
         .routing => |status| support.log(
             .debug,
-            "Routing is '{s}', hosts '{s}', owner '{s}', remote activity '{s}' because the AirPods routing state changed.",
+            "Routing is '{s}', hosts '{s}', owner '{s}', remote activity '{s}'.",
             .{
                 status.multipointName(),
                 status.hosts.name(),
