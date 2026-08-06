@@ -49,6 +49,10 @@ const Server = struct {
     reconnect_delay_ms: i64 = idle_poll_ms,
     failure: support.ErrorMessage = .{},
 
+    fn needsPersistentConnection(self: *const Server) bool {
+        return self.wear.mode != .off or self.switching.mode == .mpris;
+    }
+
     fn disconnect(self: *Server) void {
         if (self.connection) |connection| {
             bluez.close(connection.fd);
@@ -58,11 +62,11 @@ const Server = struct {
         self.wear.reset();
         self.switching.remoteTakeover();
         self.players.clear();
-        if (self.switching.mode == .mpris) {
+        if (self.needsPersistentConnection()) {
             self.reconnect_at_ms = transport.nowMs() + self.reconnect_delay_ms;
             if ((@as(*volatile c.sig_atomic_t, &stop_requested)).* == 0) support.log(
                 .info,
-                "Retrying the AirPods connection in {d} ms because automatic switching requires current routing ownership.",
+                "Retrying the AirPods connection in {d} ms because enabled host policies require continuous AACP wear or routing notifications.",
                 .{self.reconnect_delay_ms},
             );
             self.reconnect_delay_ms = @min(self.reconnect_delay_ms * 2, max_reconnect_delay_ms);
@@ -86,12 +90,12 @@ const Server = struct {
             ),
             .other => support.log(
                 .info,
-                "Automatic media actions are suppressed because PipeWire reports a different default audio output.",
+                "Automatic switching is suppressed because PipeWire reports a different default audio output.",
                 .{},
             ),
             .unknown => support.log(
                 .info,
-                "Automatic media actions are suppressed because PipeWire cannot identify an exact default AirPods A2DP sink.",
+                "Automatic switching is suppressed because PipeWire cannot identify an exact default AirPods A2DP sink.",
                 .{},
             ),
         }
@@ -102,7 +106,7 @@ const Server = struct {
             route.deinit();
             support.log(
                 .debug,
-                "Closed the PipeWire route monitor because its state is no longer reliable; resumable MPRIS ownership was cleared.",
+                "Closed the PipeWire route monitor because its state is no longer reliable for automatic switching.",
                 .{},
             );
         }
@@ -110,12 +114,10 @@ const Server = struct {
         self.route_available = false;
         self.logged_route_state = null;
         self.route_retry_at_ms = transport.nowMs() + idle_poll_ms;
-        self.players.clear();
     }
 
     fn ensureRoute(self: *Server) void {
-        if ((self.wear.mode == .off and self.switching.mode == .off) or
-            self.route != null or self.connection == null or
+        if (self.switching.mode != .mpris or self.route != null or self.connection == null or
             transport.nowMs() < self.route_retry_at_ms)
         {
             return;
@@ -123,7 +125,7 @@ const Server = struct {
         if (self.route_available == null or self.route_available.?) {
             support.log(
                 .debug,
-                "Starting PipeWire route monitoring because media automation requires an exact default AirPods A2DP sink.",
+                "Starting PipeWire route monitoring because automatic switching requires an exact default AirPods A2DP sink.",
                 .{},
             );
         }
@@ -133,7 +135,7 @@ const Server = struct {
             self.route_retry_at_ms = transport.nowMs() + idle_poll_ms;
             if (self.route_available == null or self.route_available.?) support.log(
                 .warn,
-                "PipeWire route monitoring is unavailable, so automatic media actions are suppressed; retrying in {d} ms.",
+                "PipeWire route monitoring is unavailable, so automatic switching is suppressed; retrying in {d} ms.",
                 .{idle_poll_ms},
             );
             self.route_available = false;
@@ -171,7 +173,6 @@ const Server = struct {
         switch (event) {
             .wear => |report| {
                 const owns_media = self.players.hasOwnership();
-                const route_selected = self.selectedRoute();
                 const evaluation = self.wear.evaluateWear(report, owns_media);
                 switch (evaluation.reason) {
                     .disabled => support.log(
@@ -196,16 +197,12 @@ const Server = struct {
                     ),
                     .pause_threshold => support.log(
                         .debug,
-                        "Selected pause because the in-ear count changed from {d} to {d}, crossing the '{s}' removal threshold ({s}); PipeWire {s}.",
+                        "Selected pause because the in-ear count changed from {d} to {d}, crossing the '{s}' removal threshold ({s}).",
                         .{
                             evaluation.previous_count.?,
                             evaluation.current_count.?,
                             @tagName(self.wear.mode),
                             if (self.wear.mode == .one) "2 to fewer than 2" else "at least 1 to 0",
-                            if (route_selected)
-                                "selected the exact AirPods A2DP sink"
-                            else
-                                "did not select the exact AirPods A2DP sink",
                         },
                     ),
                     .resume_threshold => support.log(
@@ -241,17 +238,9 @@ const Server = struct {
                 switch (evaluation.decision) {
                     .none => {},
                     .pause_media => {
-                        if (!route_selected) {
-                            support.log(
-                                .info,
-                                "Did not pause media after the in-ear count changed from {d} to {d} because PipeWire does not report AirPods as the exact default A2DP sink.",
-                                .{ evaluation.previous_count.?, evaluation.current_count.? },
-                            );
-                            return;
-                        }
                         support.log(
                             .info,
-                            "Pausing eligible MPRIS players because the in-ear count changed from {d} to {d}, crossing the '{s}' removal threshold while AirPods are the default A2DP sink.",
+                            "Pausing eligible MPRIS players because the in-ear count changed from {d} to {d}, crossing the enabled '{s}' removal threshold.",
                             .{
                                 evaluation.previous_count.?,
                                 evaluation.current_count.?,
@@ -277,18 +266,9 @@ const Server = struct {
                         }
                     },
                     .resume_media => {
-                        if (!route_selected) {
-                            self.players.clear();
-                            support.log(
-                                .info,
-                                "Discarded automatic-resume ownership because the in-ear count crossed the '{s}' insertion threshold while AirPods were not the exact default A2DP sink.",
-                                .{@tagName(self.wear.mode)},
-                            );
-                            return;
-                        }
                         support.log(
                             .info,
-                            "Resuming owned MPRIS players because the in-ear count changed from {d} to {d}, crossing the '{s}' insertion threshold while AirPods remain the default A2DP sink.",
+                            "Resuming owned MPRIS players because the in-ear count changed from {d} to {d}, crossing the enabled '{s}' insertion threshold, and airpodsctl still owns their confirmed pause transitions.",
                             .{
                                 evaluation.previous_count.?,
                                 evaluation.current_count.?,
@@ -382,7 +362,7 @@ const Server = struct {
     }
 
     fn ensureConnection(self: *Server) void {
-        if (self.connection != null or self.switching.mode != .mpris or
+        if (self.connection != null or !self.needsPersistentConnection() or
             transport.nowMs() < self.reconnect_at_ms)
         {
             return;
@@ -611,7 +591,7 @@ const Server = struct {
             );
             self.replyFailure(client, deadline_ms, request.version);
 
-            // A protocol failure leaves the stream and cached state unreliable; reconnect on demand.
+            // A protocol failure leaves the stream and cached state unreliable; let policy recovery reconnect it.
             self.disconnect();
             return;
         };
@@ -662,11 +642,11 @@ const Server = struct {
                 .{},
             );
             self.failure.len = 0;
-            if (self.switching.mode == .mpris) {
+            if (self.needsPersistentConnection()) {
                 self.reconnect_at_ms = transport.nowMs() + self.reconnect_delay_ms;
                 support.log(
                     .info,
-                    "Retrying the AirPods connection in {d} ms because automatic switching requires continuous routing state.",
+                    "Retrying the AirPods connection in {d} ms because enabled host policies require continuous AACP wear or routing notifications.",
                     .{self.reconnect_delay_ms},
                 );
             }
@@ -734,17 +714,16 @@ const Server = struct {
                 if (self.route) |*route| route.dispatch() catch {
                     support.log(
                         .warn,
-                        "PipeWire route monitoring was reset because dispatch failed; automatic media actions remain suppressed until monitoring recovers.",
+                        "PipeWire route monitoring was reset because dispatch failed; automatic switching remains suppressed until monitoring recovers.",
                         .{},
                     );
                     self.closeRoute();
                 };
                 self.logRouteState();
-                if (!self.selectedRoute()) self.players.clear();
             } else if (descriptors[3].revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL) != 0) {
                 support.log(
                     .warn,
-                    "PipeWire route monitoring was reset because poll reported an error or hangup; automatic media actions remain suppressed until monitoring recovers.",
+                    "PipeWire route monitoring was reset because poll reported an error or hangup; automatic switching remains suppressed until monitoring recovers.",
                     .{},
                 );
                 self.closeRoute();

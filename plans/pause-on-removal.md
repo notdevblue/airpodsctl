@@ -1,6 +1,6 @@
 # Pause on removal host media policy
 
-Status: implemented provisionally. AACP wear parsing, controller state/events, the pure transition policy, the PipeWire active-route gate, and bounded MPRIS pause/resume ownership are present. Live testing on AirPods Pro 2 USB-C confirmed pause after removal and resume after reinsertion. The broader hardware and desktop acceptance matrix remains outstanding.
+Status: implemented provisionally. AACP wear parsing, controller state/events, the pure transition policy, persistent control-session recovery, and bounded MPRIS pause/resume ownership are present. Live testing on AirPods Pro 2 USB-C confirmed pause after removal and resume after reinsertion. The broader hardware and desktop acceptance matrix remains outstanding.
 
 ## Scope
 
@@ -14,9 +14,6 @@ connection-scoped wear state
         |
         v
 explicit pause-on-removal policy
-        |
-        v
-PipeWire active-route gate
         |
         v
 bounded MPRIS pause/resume
@@ -80,21 +77,13 @@ Required behavior:
 - Unknown states clear the transition baseline so no change is inferred across uncertain data.
 - Losing the AACP connection clears the baseline and automatic-resume ownership.
 - Reconnecting establishes a new baseline and never resumes media paused by an earlier connection.
+- An enabled policy retries a lost AACP control session with bounded exponential backoff instead of waiting for a client command.
 
-## Active-route gate
+## Host-wide action scope
 
-Wear transitions may control media only while PipeWire identifies the selected AirPods Bluetooth address as the exact default A2DP sink.
+Pause-on-removal is an explicitly enabled host policy and does not depend on the PipeWire default sink. A qualifying wear transition may therefore pause eligible MPRIS players even when another physical or virtual output is selected, the AirPods use a non-A2DP profile, or PipeWire is unavailable.
 
-The policy must fail closed when:
-
-- another physical output is selected;
-- a virtual or aggregate sink is the default;
-- only HFP/HSP is active;
-- the Bluetooth address or profile is missing;
-- PipeWire/WirePlumber is unavailable or restarting;
-- the monitored route becomes stale or unknown.
-
-airpodsctl observes routing state but does not change the default sink or Bluetooth profile.
+This behavior is intentional: wear notifications establish that the configured AirPods were removed, while the opt-in policy defines that event as a request to pause host media generally. PipeWire route monitoring remains a separate safety requirement for experimental automatic multipoint switching.
 
 ## MPRIS ownership
 
@@ -104,10 +93,9 @@ A player becomes eligible for automatic resume only when:
 
 1. airpodsctl requested its pause;
 2. a later property read confirmed `Paused`;
-3. the D-Bus owner is unchanged; and
-4. the AirPods route is still selected at reinsertion time.
+3. the D-Bus owner is unchanged.
 
-Players that were already paused are never resumed. Manual playback changes, player disappearance, D-Bus loss, route loss, or AACP disconnect clear ownership conservatively. Multiple players are tracked independently and bounded operations prevent one unresponsive player from blocking the service indefinitely.
+Players that were already paused are never resumed. Manual playback changes, player disappearance, D-Bus loss, or AACP disconnect clear ownership conservatively. A default-sink change does not clear ownership because routing is outside this host-wide policy. Multiple players are tracked independently and bounded operations prevent one unresponsive player from blocking the service indefinitely.
 
 ## Controller and service ownership
 
@@ -118,7 +106,7 @@ This separation ensures:
 - one-shot `wear-status` cannot trigger playback changes;
 - unrelated commands cannot consume wear notifications needed by the service;
 - packet parsing remains independently testable;
-- MPRIS and PipeWire failures do not corrupt Bluetooth protocol state.
+- MPRIS failures do not corrupt Bluetooth protocol state.
 
 The persistent IPC protocol keeps `wear-status` on version 2. Wear events are not streamed to clients; the service returns only its latest cached snapshot.
 
@@ -134,8 +122,6 @@ Protocol and policy tests cover:
 - primary/secondary swaps;
 - in-case and unknown handling;
 - reconnect resets;
-- wrong and unknown PipeWire routes;
-- virtual sinks and non-A2DP profiles;
 - multiple MPRIS players with mixed outcomes;
 - confirmed-pause ownership;
 - user playback changes, player disappearance, and D-Bus restart;
@@ -161,8 +147,8 @@ Desktop validation should include:
 - a player already paused before removal;
 - manual play or pause between removal and reinsertion;
 - player exit or restart while removed;
-- D-Bus and PipeWire restart;
-- another physical output, a virtual default sink, and profile changes;
+- D-Bus restart;
+- another physical output, a virtual default sink, and profile changes, all of which must leave the host-wide policy active;
 - removal while no player is active.
 
 ## Non-goals

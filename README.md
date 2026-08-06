@@ -73,7 +73,7 @@ Logging levels control the amount of detail:
 - `-vv` also enables `debug` protocol stages, policy inputs, safety invariants, and reasons for taking or suppressing an action.
 - `--log-level=error|warn|info|debug` selects a level explicitly and cannot be combined with `-v`.
 
-Every diagnostic includes why the event occurred or why the action was chosen. For example, pause-on-removal logs the previous and current in-ear counts, the configured threshold, whether PipeWire selected the exact AirPods A2DP sink, and whether airpodsctl owns confirmed MPRIS pause transitions. Info and debug diagnostics remain identifier-free: they do not contain Bluetooth addresses, device or player names, D-Bus identities, socket paths, or raw protocol packets. A terminal error may repeat a user-supplied address when that value is the reason validation or service-device matching failed.
+Every diagnostic includes why the event occurred or why the action was chosen. For example, pause-on-removal logs the previous and current in-ear counts, the configured threshold, and whether airpodsctl owns confirmed MPRIS pause transitions. Info and debug diagnostics remain identifier-free: they do not contain Bluetooth addresses, device or player names, D-Bus identities, socket paths, or raw protocol packets. A terminal error may repeat a user-supplied address when that value is the reason validation or service-device matching failed.
 
 Only the level label is colored. `--color=auto` is the default and enables ANSI colors only when standard error is an interactive terminal, `TERM` is not `dumb`, and `NO_COLOR` is unset or empty. Use `--color=always` or `--color=never` to override that behavior. Redirected output and journald therefore remain plain text by default.
 
@@ -116,7 +116,7 @@ The available commands are:
 
 Wear notifications and host media automation are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/pause-on-removal.md). `wear-status` therefore remains provisional and fails when the AirPods do not provide a wear snapshot.
 
-Wear-aware media control requires PipeWire/WirePlumber. The explicitly configured `--pause-on-removal` policy is the only ear-detection automation exposed by airpodsctl and operates directly from AACP wear notifications. Its first valid wear snapshot establishes a baseline and never changes playback. Media actions occur only when PipeWire identifies the selected AirPods address as the exact default A2DP audio sink; unknown routing, virtual default sinks, another output, or a PipeWire restart suppresses them. On removal, every bounded MPRIS player reporting `Playing` and supporting pause is paused. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed.
+The explicitly configured `--pause-on-removal` policy is the only ear-detection automation exposed by airpodsctl and operates directly from AACP wear notifications. Its first valid wear snapshot establishes a baseline and never changes playback. A qualifying removal pauses every bounded MPRIS player reporting `Playing` and supporting pause, regardless of the current PipeWire default sink. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed. While the policy is enabled, the service retries a lost AACP control session with bounded exponential backoff so automation can recover without a client command.
 
 ## Experimental multipoint switching
 
@@ -160,7 +160,7 @@ $ systemctl --user daemon-reload
 $ systemctl --user enable --now airpodsctl.service
 ```
 
-The unit runs `airpodsctl serve` in the foreground and restarts it after unexpected process failures. A temporary AirPods disconnection does not terminate the service: it keeps the local socket available and reconnects when a later command needs the device.
+The unit runs `airpodsctl serve` in the foreground and restarts it after unexpected process failures. A temporary AirPods disconnection does not terminate the service: it keeps the local socket available. With an automatic host policy enabled, it proactively retries the control session; otherwise, a later command reconnects on demand.
 
 The installed unit keeps both media policies disabled. Enable either or both with a user override that replaces `ExecStart`, for example:
 
