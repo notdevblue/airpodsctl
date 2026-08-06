@@ -4,6 +4,7 @@ const command = @import("command");
 const control_command = @import("control_command");
 const noise_control = @import("noise_control");
 const smart_routing = @import("smart_routing");
+const support = @import("support");
 const wear_detection = @import("wear_detection");
 
 pub const Error = aacp.Error;
@@ -39,6 +40,44 @@ pub const EventObserver = struct {
     }
 };
 
+fn loggedEvent(event: Event) Event {
+    switch (event) {
+        .listening_mode => |mode| support.log(
+            .debug,
+            "The listening mode is now '{s}' because the AirPods sent a valid control-command notification.",
+            .{mode.name()},
+        ),
+        .battery => |report| {
+            if (report.left) |reading| support.log(
+                .debug,
+                "The left earbud reports {d}% and {s} because its battery notification was valid.",
+                .{ reading.level, reading.state.name() },
+            );
+            if (report.right) |reading| support.log(
+                .debug,
+                "The right earbud reports {d}% and {s} because its battery notification was valid.",
+                .{ reading.level, reading.state.name() },
+            );
+        },
+        .wear => |report| support.log(
+            .debug,
+            "The wear state is primary '{s}', secondary '{s}' because the AirPods sent a valid wear notification.",
+            .{ report.primary.name(), report.secondary.name() },
+        ),
+        .routing => |status| support.log(
+            .debug,
+            "Routing is '{s}', hosts '{s}', owner '{s}', remote activity '{s}' because the AirPods routing state changed.",
+            .{
+                status.multipointName(),
+                status.hosts.name(),
+                status.owner.name(),
+                status.remote_activity.name(),
+            },
+        ),
+    }
+    return event;
+}
+
 pub const Controller = struct {
     session: aacp.Session,
     local_address: ?smart_routing.Address = null,
@@ -57,7 +96,7 @@ pub const Controller = struct {
             }) |mode| {
                 self.state.listening_mode = mode;
                 self.state.listening_mode_generation +%= 1;
-                return .{ .listening_mode = mode };
+                return loggedEvent(.{ .listening_mode = mode });
             }
             if (smart_routing.parseOwnership(control_state) catch {
                 self.session.channel.failure.set("AirPods returned an invalid routing-ownership response", .{});
@@ -66,7 +105,7 @@ pub const Controller = struct {
                 self.state.routing.updateOwnership(owns);
                 self.state.ownership_generation +%= 1;
                 self.state.routing_generation +%= 1;
-                return .{ .routing = self.state.routing.status() };
+                return loggedEvent(.{ .routing = self.state.routing.status() });
             }
             return null;
         }
@@ -86,7 +125,7 @@ pub const Controller = struct {
                 },
             }
             self.state.routing_generation +%= 1;
-            return .{ .routing = self.state.routing.status() };
+            return loggedEvent(.{ .routing = self.state.routing.status() });
         }
         if (wear_detection.parseWearPacket(packet) catch {
             self.session.channel.failure.set("AirPods returned an invalid wear-state response", .{});
@@ -94,7 +133,7 @@ pub const Controller = struct {
         }) |report| {
             self.state.wear = report;
             self.state.wear_generation +%= 1;
-            return .{ .wear = report };
+            return loggedEvent(.{ .wear = report });
         }
         if (battery.parsePacket(packet) catch {
             self.session.channel.failure.set("AirPods returned an invalid battery response", .{});
@@ -105,7 +144,7 @@ pub const Controller = struct {
             if (report.right) |reading| self.state.battery.right = reading;
             if (report.left != null or report.right != null) {
                 self.state.battery_generation +%= 1;
-                return .{ .battery = report };
+                return loggedEvent(.{ .battery = report });
             }
         }
         return null;

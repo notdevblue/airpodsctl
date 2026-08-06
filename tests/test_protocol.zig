@@ -458,6 +458,66 @@ test "session command parsing" {
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--session", "serve" }) == .usage);
 }
 
+test "log level and color parsing is global and explicit" {
+    const default = cli.parseInvocation(&.{ "airpodsctl", "status" });
+    const info = cli.parseInvocation(&.{ "airpodsctl", "battery", "--verbose" });
+    const debug = cli.parseInvocation(&.{ "airpodsctl", "-vv", "--direct", "status" });
+    const explicit = cli.parseInvocation(&.{ "airpodsctl", "--log-level=error", "--color=always", "serve" });
+
+    try std.testing.expectEqual(support.LogLevel.warn, default.execute.log_level);
+    try std.testing.expectEqual(support.ColorMode.auto, default.execute.color);
+    try std.testing.expectEqual(support.LogLevel.info, info.execute.log_level);
+    try std.testing.expectEqual(support.LogLevel.debug, debug.execute.log_level);
+    try std.testing.expectEqual(support.LogLevel.@"error", explicit.serve.log_level);
+    try std.testing.expectEqual(support.ColorMode.always, explicit.serve.color);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "-v", "--log-level=debug", "status" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--log-level=trace", "status" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--color=sometimes", "status" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "--color=auto", "--color=never", "status" }) == .usage);
+    try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "status", "--", "--verbose" }) == .usage);
+}
+
+test "logging filters levels and colors only the level label" {
+    var pipe_fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&pipe_fds));
+    defer _ = c.close(pipe_fds[0]);
+
+    const saved_stderr = c.dup(c.STDERR_FILENO);
+    try std.testing.expect(saved_stderr >= 0);
+    var stderr_restored = false;
+    defer {
+        support.configureLogging(.warn, .auto);
+        if (!stderr_restored) _ = c.dup2(saved_stderr, c.STDERR_FILENO);
+        _ = c.close(saved_stderr);
+    }
+    try std.testing.expect(c.dup2(pipe_fds[1], c.STDERR_FILENO) >= 0);
+
+    support.configureLogging(.warn, .never);
+    support.log(.debug, "This is hidden because the configured level is warn.", .{});
+    support.log(.warn, "Retrying because a recoverable dependency failed.", .{});
+    support.configureLogging(.debug, .never);
+    support.log(.debug, "The decision is visible because debug logging is enabled.", .{});
+    support.configureLogging(.info, .auto);
+    support.log(.info, "Color is absent because redirected stderr is not a terminal.", .{});
+    support.configureLogging(.info, .always);
+    support.log(.info, "Color is forced because --color=always was selected.", .{});
+
+    try std.testing.expect(c.dup2(saved_stderr, c.STDERR_FILENO) >= 0);
+    stderr_restored = true;
+    _ = c.close(pipe_fds[1]);
+
+    var output: [1024]u8 = undefined;
+    const length = c.read(pipe_fds[0], &output, output.len);
+    try std.testing.expect(length >= 0);
+    try std.testing.expectEqualStrings(
+        "airpodsctl: WARN   Retrying because a recoverable dependency failed.\n" ++
+            "airpodsctl: DEBUG  The decision is visible because debug logging is enabled.\n" ++
+            "airpodsctl: INFO   Color is absent because redirected stderr is not a terminal.\n" ++
+            "airpodsctl: \x1b[36mINFO \x1b[0m  Color is forced because --color=always was selected.\n",
+        output[0..@intCast(length)],
+    );
+}
+
 test "serve auto-switch parsing is opt in" {
     const disabled = cli.parseInvocation(&.{ "airpodsctl", "serve" });
     const enabled = cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=mpris" });
@@ -491,6 +551,7 @@ test "switching commands require the service for mutations" {
 
 test "IPC request and response encoding" {
     var packet: [512]u8 = undefined;
+    var quiet_packet: [512]u8 = undefined;
     var noise_request = operations.NoiseControl{ .action = .toggle, .toggle_mode_count = 2 };
     noise_request.toggle_modes[0] = .off;
     noise_request.toggle_modes[1] = .adaptive;
@@ -498,12 +559,20 @@ test "IPC request and response encoding" {
         .requested_address = "18:3F:70:6F:A1:06",
         .backend = .session,
         .operation = .{ .noise_control = noise_request },
+        .log_level = .debug,
+        .color = .always,
     }));
+    const quiet_request = try ipc.encodeRequest(&quiet_packet, .{
+        .requested_address = "18:3F:70:6F:A1:06",
+        .backend = .session,
+        .operation = .{ .noise_control = noise_request },
+    });
 
     try std.testing.expectEqualStrings("18:3F:70:6F:A1:06", decoded_request.requested_address.?);
     try std.testing.expectEqual(noise_control.Action.toggle, decoded_request.operation.noise_control.action);
     try std.testing.expectEqual(@as(usize, 2), decoded_request.operation.noise_control.toggle_mode_count);
     try std.testing.expectEqual(noise_control.Mode.adaptive, decoded_request.operation.noise_control.toggle_modes[1]);
+    try std.testing.expectEqualSlices(u8, quiet_request, packet[0..quiet_request.len]);
 
     var failure = support.ErrorMessage{};
     _ = ipc.encodeResult(&packet, .{ .battery = .{
@@ -980,6 +1049,19 @@ test "wear policy baselines snapshots, transitions, and resets conservatively" {
 
     var off = wear_policy.Policy{ .mode = .off };
     try std.testing.expectEqual(wear_policy.Decision.none, off.updateWear(none_in, true));
+
+    var causal = wear_policy.Policy{ .mode = .one };
+    const baseline = causal.evaluateWear(both_in, false);
+    const pause = causal.evaluateWear(one_in, false);
+    const unowned_resume = causal.evaluateWear(both_in, false);
+    const incomplete = causal.evaluateWear(unknown, true);
+    try std.testing.expectEqual(wear_policy.Reason.baseline, baseline.reason);
+    try std.testing.expectEqual(@as(?u8, 2), baseline.current_count);
+    try std.testing.expectEqual(wear_policy.Reason.pause_threshold, pause.reason);
+    try std.testing.expectEqual(wear_policy.Decision.pause_media, pause.decision);
+    try std.testing.expectEqual(wear_policy.Reason.resume_not_owned, unowned_resume.reason);
+    try std.testing.expectEqual(wear_policy.Decision.none, unowned_resume.decision);
+    try std.testing.expectEqual(wear_policy.Reason.incomplete_state, incomplete.reason);
 }
 
 test "PipeWire route classification requires the exact selected A2DP sink" {

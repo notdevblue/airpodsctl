@@ -96,6 +96,7 @@ pub fn build(builder: *std.Build) void {
     controller_module.addImport("wear_detection", wear_detection_module);
     controller_module.addImport("noise_control", noise_control_module);
     controller_module.addImport("smart_routing", smart_routing_module);
+    controller_module.addImport("support", support_module);
 
     const cli_module = builder.createModule(.{
         .root_source_file = builder.path("src/cli.zig"),
@@ -105,6 +106,7 @@ pub fn build(builder: *std.Build) void {
     cli_module.addImport("battery", battery_module);
     cli_module.addImport("command", command_module);
     cli_module.addImport("noise_control", noise_control_module);
+    cli_module.addImport("support", support_module);
     cli_module.addImport("switching_policy", switching_policy_module);
 
     const bluez_module = builder.createModule(.{
@@ -295,6 +297,10 @@ pub fn build(builder: *std.Build) void {
         &.{ "serve", "--auto-switch=invalid" },
         &.{ "serve", "--auto-switch=mpris", "--auto-switch=off" },
         &.{ "status", "--auto-switch=mpris" },
+        &.{ "-v", "--log-level=debug", "status" },
+        &.{ "status", "--log-level=trace" },
+        &.{ "status", "--color=sometimes" },
+        &.{ "status", "--color=auto", "--color=never" },
         &.{ "--session", "--direct", "status" },
         &.{ "--session", "serve" },
         &.{ "--direct", "serve" },

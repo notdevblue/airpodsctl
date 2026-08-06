@@ -1,5 +1,21 @@
 const std = @import("std");
 
+pub const LogLevel = enum {
+    @"error",
+    warn,
+    info,
+    debug,
+};
+
+pub const ColorMode = enum {
+    auto,
+    always,
+    never,
+};
+
+var configured_level: LogLevel = .warn;
+var configured_color: ColorMode = .auto;
+
 // Translate declarations without glibc's compiler-specific fortified inline wrappers.
 pub const c = @cImport({
     @cUndef("_FORTIFY_SOURCE");
@@ -46,6 +62,11 @@ pub fn lastErrno() c_int {
     return c.__errno_location().*;
 }
 
+pub fn configureLogging(level: LogLevel, color: ColorMode) void {
+    configured_level = level;
+    configured_color = color;
+}
+
 fn writeAll(fd: c_int, bytes: []const u8) void {
     var remaining = bytes;
     while (remaining.len != 0) {
@@ -60,8 +81,56 @@ fn writeAll(fd: c_int, bytes: []const u8) void {
     }
 }
 
-pub fn warn(message: []const u8) void {
-    writeAll(c.STDERR_FILENO, "airpodsctl: warning: ");
+fn allows(level: LogLevel) bool {
+    return @intFromEnum(level) <= @intFromEnum(configured_level);
+}
+
+fn writeLog(level: LogLevel, message: []const u8) void {
+    if (!allows(level)) return;
+
+    const no_color = c.getenv("NO_COLOR");
+    const term = c.getenv("TERM");
+    const use_color = switch (configured_color) {
+        .always => true,
+        .never => false,
+        .auto => c.isatty(c.STDERR_FILENO) == 1 and
+            (no_color == null or std.mem.span(no_color).len == 0) and
+            (term == null or !std.mem.eql(u8, std.mem.span(term), "dumb")),
+    };
+    const label = switch (level) {
+        .debug => "DEBUG",
+        .info => "INFO ",
+        .warn => "WARN ",
+        .@"error" => "ERROR",
+    };
+
+    writeAll(c.STDERR_FILENO, "airpodsctl: ");
+    if (use_color) writeAll(c.STDERR_FILENO, switch (level) {
+        .debug => "\x1b[2m",
+        .info => "\x1b[36m",
+        .warn => "\x1b[33m",
+        .@"error" => "\x1b[1;31m",
+    });
+    writeAll(c.STDERR_FILENO, label);
+    if (use_color) writeAll(c.STDERR_FILENO, "\x1b[0m");
+    writeAll(c.STDERR_FILENO, "  ");
     writeAll(c.STDERR_FILENO, message);
     writeAll(c.STDERR_FILENO, "\n");
+}
+
+pub fn emit(level: LogLevel, value: []const u8) void {
+    writeLog(level, value);
+}
+
+pub fn log(level: LogLevel, comptime format: []const u8, arguments: anytype) void {
+    if (!allows(level)) return;
+
+    var buffer: [512]u8 = undefined;
+    const rendered = std.fmt.bufPrint(&buffer, format, arguments) catch
+        "The diagnostic could not be rendered because its formatted message exceeded 512 bytes.";
+    writeLog(level, rendered);
+}
+
+pub fn warn(message: []const u8) void {
+    writeLog(.warn, message);
 }

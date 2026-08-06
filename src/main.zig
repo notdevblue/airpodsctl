@@ -26,9 +26,11 @@ fn writeAll(fd: c_int, bytes: []const u8) void {
 }
 
 fn writeFailure(failure: *const support.ErrorMessage) void {
-    writeAll(support.c.STDERR_FILENO, "airpodsctl: ");
-    writeAll(support.c.STDERR_FILENO, failure.text());
-    writeAll(support.c.STDERR_FILENO, "\n");
+    support.log(
+        .@"error",
+        "The requested operation failed; cause: {s}",
+        .{failure.text()},
+    );
 }
 
 fn writeBatteryLine(component: battery.Component, reading: ?battery.Reading) void {
@@ -87,18 +89,45 @@ fn writeResult(result: operations.Result) void {
 }
 
 fn execute(command: cli.Command) u8 {
+    support.configureLogging(command.log_level, command.color);
+    support.log(
+        .info,
+        "Running '{s}' because it was requested on the command line.",
+        .{command.operation.name()},
+    );
+
     var failure = support.ErrorMessage{};
-    writeResult(switch (command.backend) {
-        .direct => app.run(command, &failure),
-        .session => ipc.request(command, &failure),
-        .automatic => ipc.request(command, &failure) catch |request_failure| switch (request_failure) {
-            error.Unavailable => app.run(command, &failure),
-            else => request_failure,
+    const result = switch (command.backend) {
+        .direct => operation: {
+            support.log(.info, "Using a direct Bluetooth connection because --direct bypasses the session service.", .{});
+            break :operation app.run(command, &failure);
+        },
+        .session => operation: {
+            support.log(.info, "Using the session service because --session requires an existing service connection.", .{});
+            break :operation ipc.request(command, &failure);
+        },
+        .automatic => operation: {
+            support.log(
+                .info,
+                "Trying the session service first because the automatic backend prefers its shared AirPods control connection.",
+                .{},
+            );
+            break :operation ipc.request(command, &failure) catch |request_failure| switch (request_failure) {
+                error.Unavailable => fallback: {
+                    support.log(.info, "Using a direct Bluetooth connection because no session service is available.", .{});
+                    break :fallback app.run(command, &failure);
+                },
+                else => request_failure,
+            };
         },
     } catch {
+        support.log(.debug, "The '{s}' operation produced no result because its selected backend failed.", .{command.operation.name()});
         writeFailure(&failure);
         return 1;
-    });
+    };
+
+    support.log(.debug, "The '{s}' operation completed because its response was validated successfully.", .{command.operation.name()});
+    writeResult(result);
 
     return 0;
 }
@@ -125,6 +154,7 @@ pub fn main(init: std.process.Init) u8 {
             break :result 2;
         },
         .serve => |configuration| result: {
+            support.configureLogging(configuration.log_level, configuration.color);
             var failure = support.ErrorMessage{};
             server.run(configuration, &failure) catch {
                 writeFailure(&failure);

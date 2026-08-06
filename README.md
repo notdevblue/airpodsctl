@@ -55,6 +55,30 @@ $ airpodsctl --direct status
 noise-cancellation
 ```
 
+Add `-v` or `--verbose` to log causal, human-readable operational diagnostics to standard error without changing normal command output:
+
+```console
+$ airpodsctl -v --direct status
+airpodsctl: INFO   Running 'status' because it was requested on the command line.
+airpodsctl: INFO   Using a direct Bluetooth connection because --direct bypasses the session service.
+airpodsctl: INFO   Looking for connected AirPods because the operation is using a direct Bluetooth connection.
+airpodsctl: INFO   The AirPods control session is ready because its handshake and notification subscription completed.
+noise-cancellation
+```
+
+Logging levels control the amount of detail:
+
+- The default `warn` level reports recoverable failures and terminal errors.
+- `-v` or `--verbose` enables `info` lifecycle, state-transition, and policy-action messages.
+- `-vv` also enables `debug` protocol stages, policy inputs, safety invariants, and reasons for taking or suppressing an action.
+- `--log-level=error|warn|info|debug` selects a level explicitly and cannot be combined with `-v`.
+
+Every diagnostic includes why the event occurred or why the action was chosen. For example, pause-on-removal logs the previous and current in-ear counts, the configured threshold, whether PipeWire selected the exact AirPods A2DP sink, and whether airpodsctl owns confirmed MPRIS pause transitions. Info and debug diagnostics remain identifier-free: they do not contain Bluetooth addresses, device or player names, D-Bus identities, socket paths, or raw protocol packets. A terminal error may repeat a user-supplied address when that value is the reason validation or service-device matching failed.
+
+Only the level label is colored. `--color=auto` is the default and enables ANSI colors only when standard error is an interactive terminal, `TERM` is not `dumb`, and `NO_COLOR` is unset or empty. Use `--color=always` or `--color=never` to override that behavior. Redirected output and journald therefore remain plain text by default.
+
+Logging configuration is process-local. A verbose client explains its own session request, but an already-running service reports internal connection, wear, routing, and media-policy decisions only when that service was started with `-v`, `-vv`, or an explicit `--log-level`.
+
 Automatic fallback occurs only when the session socket is absent or has no listener. Errors returned by a running service are reported directly instead of opening a second AACP connection.
 
 Multipoint ownership changes require the service because it confirms the AirPods acknowledgement and retains the 30-second idle-release timer:
@@ -147,6 +171,8 @@ ExecStart=/usr/bin/env airpodsctl serve --pause-on-removal=one --auto-switch=mpr
 ```
 
 Run `systemctl --user daemon-reload` and restart the unit after changing the override.
+
+Append `-v` for operational logs or `--log-level=debug` for full decision diagnostics, then follow them with `journalctl --user -u airpodsctl.service -f`. The installed unit emits only warnings and errors by default, and automatic color detection keeps journal entries free of ANSI escapes.
 
 AirPods Pro 2 may reject the Off command until **Off Listening Mode** has been enabled once from a compatible iPhone, iPad, or Mac. Turning listening modes off also disables the AirPods' hearing-protection processing.
 

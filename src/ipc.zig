@@ -591,6 +591,17 @@ pub fn acceptClient(fd: c_int, failure: *support.ErrorMessage) Error!c_int {
 }
 
 pub fn request(value: cli.Command, failure: *support.ErrorMessage) Error!command.Result {
+    support.log(
+        .debug,
+        "Connecting to the session service for '{s}' because {s}.",
+        .{
+            value.operation.name(),
+            if (value.backend == .automatic)
+                "the automatic backend prefers the existing shared AirPods control connection"
+            else
+                "--session requires the running service",
+        },
+    );
     const path = try getSocketPath(failure);
     var address = socketAddress(&path);
     const deadline_ms = transport.nowMs() + request_timeout_ms;
@@ -627,6 +638,7 @@ pub fn request(value: cli.Command, failure: *support.ErrorMessage) Error!command
             return error.IpcFailure;
         }
     }
+    support.log(.debug, "The session connection is ready because the local service accepted the client socket.", .{});
 
     var packet: [packet_size]u8 = undefined;
     const version = operationVersion(value.operation);
@@ -634,8 +646,26 @@ pub fn request(value: cli.Command, failure: *support.ErrorMessage) Error!command
         failure.set("invalid Bluetooth address: {s}", .{value.requested_address.?});
         return error.IpcFailure;
     }, deadline_ms, failure);
-    return decodeResultForVersion(try receivePacket(fd, &packet, deadline_ms, failure), version, failure) catch {
+    support.log(
+        .debug,
+        "Sent the '{s}' request because the session service owns the shared AirPods connection.",
+        .{value.operation.name()},
+    );
+
+    const response = try receivePacket(fd, &packet, deadline_ms, failure);
+    support.log(
+        .debug,
+        "Received the '{s}' response because the session service completed the requested operation.",
+        .{value.operation.name()},
+    );
+    const result = decodeResultForVersion(response, version, failure) catch {
         if (failure.text().len == 0) failure.set("session service returned an invalid response", .{});
         return error.IpcFailure;
     };
+    support.log(
+        .debug,
+        "Accepted the '{s}' response because its IPC version and typed payload were valid.",
+        .{value.operation.name()},
+    );
+    return result;
 }

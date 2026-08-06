@@ -33,6 +33,26 @@ pub const Operation = union(enum) {
     battery: ?battery.Component,
     wear_status,
     switching: Switching,
+
+    pub fn name(self: Operation) []const u8 {
+        return switch (self) {
+            .noise_control => |request| switch (request.action) {
+                .status => "status",
+                .anc => "anc",
+                .off => "off",
+                .transparency => "transparency",
+                .adaptive => "adaptive",
+                .toggle => "toggle",
+            },
+            .battery => "battery",
+            .wear_status => "wear-status",
+            .switching => |request| switch (request.action) {
+                .status => "switching-status",
+                .take => "switching-take",
+                .release => "switching-release",
+            },
+        };
+    }
 };
 
 pub const BatteryResult = struct {

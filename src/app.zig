@@ -18,12 +18,14 @@ pub const Result = operations.Result;
 pub fn run(command: cli.Command, failure: *support.ErrorMessage) Error!Result {
     // Start the shared budget before discovery so later phases inherit time already spent.
     const deadline_ms = transport.nowMs() + timeout_ms;
+    support.log(.info, "Looking for connected AirPods because the operation is using a direct Bluetooth connection.", .{});
     const fd = try bluez.openControlChannel(
         try bluez.discover(command.requested_address, failure),
         deadline_ms,
         failure,
     );
     defer bluez.close(fd);
+    support.log(.debug, "The Bluetooth control channel is connected because the AirPods accepted the AACP L2CAP connection.", .{});
 
     var control = controller.Controller{
         .session = try aacp.Session.initialize(fd, deadline_ms, initialization_delay_ms, failure),
@@ -32,5 +34,6 @@ pub fn run(command: cli.Command, failure: *support.ErrorMessage) Error!Result {
         else
             null,
     };
+    support.log(.info, "The AirPods control session is ready because its handshake and notification subscription completed.", .{});
     return control.run(command.operation, deadline_ms);
 }

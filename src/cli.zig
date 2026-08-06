@@ -2,16 +2,17 @@ const std = @import("std");
 const battery = @import("battery");
 const command = @import("command");
 const noise_control = @import("noise_control");
+const support = @import("support");
 const switching_policy = @import("switching_policy");
 
 pub const usage =
-    \\Usage: airpodsctl [--device MAC] COMMAND
-    \\       airpodsctl [--device MAC] toggle [MODE...]
-    \\       airpodsctl [--device MAC] battery [COMPONENT]
-    \\       airpodsctl [--device MAC] wear-status
-    \\       airpodsctl [--device MAC] switching status|release
-    \\       airpodsctl [--device MAC] switching take [--force]
-    \\       airpodsctl [--device MAC] serve [--pause-on-removal=POLICY] [--auto-switch=MODE]
+    \\Usage: airpodsctl [-v] [--device MAC] COMMAND
+    \\       airpodsctl [-v] [--device MAC] toggle [MODE...]
+    \\       airpodsctl [-v] [--device MAC] battery [COMPONENT]
+    \\       airpodsctl [-v] [--device MAC] wear-status
+    \\       airpodsctl [-v] [--device MAC] switching status|release
+    \\       airpodsctl [-v] [--device MAC] switching take [--force]
+    \\       airpodsctl [-v] [--device MAC] serve [--pause-on-removal=POLICY] [--auto-switch=MODE]
     \\
     \\Commands:
     \\  status        Print the current listening mode
@@ -41,6 +42,11 @@ pub const usage =
     \\  mpris, off
     \\
     \\Options:
+    \\  -v, --verbose     Log informational diagnostics to standard error
+    \\  -vv               Also log internal decision and protocol stages
+    \\      --log-level LEVEL
+    \\                    Set error, warn, info, or debug logging
+    \\      --color WHEN  Color log levels: auto, always, or never
     \\  -d, --device MAC  Select connected AirPods by Bluetooth address
     \\      --session     Require a running session service
     \\      --direct      Bypass the session service
@@ -64,12 +70,16 @@ pub const Command = struct {
     requested_address: ?[]const u8,
     backend: Backend,
     operation: command.Operation,
+    log_level: support.LogLevel = .warn,
+    color: support.ColorMode = .auto,
 };
 
 pub const ServeCommand = struct {
     requested_address: ?[]const u8,
     pause_on_removal: command.PauseOnRemoval,
     auto_switch: switching_policy.Mode,
+    log_level: support.LogLevel = .warn,
+    color: support.ColorMode = .auto,
 };
 
 pub const Invocation = union(enum) {
@@ -93,6 +103,21 @@ fn parseAutoSwitch(value: []const u8) ?switching_policy.Mode {
     return null;
 }
 
+fn parseLogLevel(value: []const u8) ?support.LogLevel {
+    if (std.mem.eql(u8, value, "error")) return .@"error";
+    if (std.mem.eql(u8, value, "warn")) return .warn;
+    if (std.mem.eql(u8, value, "info")) return .info;
+    if (std.mem.eql(u8, value, "debug")) return .debug;
+    return null;
+}
+
+fn parseColorMode(value: []const u8) ?support.ColorMode {
+    if (std.mem.eql(u8, value, "auto")) return .auto;
+    if (std.mem.eql(u8, value, "always")) return .always;
+    if (std.mem.eql(u8, value, "never")) return .never;
+    return null;
+}
+
 pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     // Keep an overflow slot so a fifth toggle mode is rejected by mode-count validation.
     var positional: [command.max_toggle_modes + 2][]const u8 = undefined;
@@ -101,6 +126,9 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
     var pause_on_removal: ?command.PauseOnRemoval = null;
     var auto_switch: ?switching_policy.Mode = null;
     var force = false;
+    var verbosity: u8 = 0;
+    var requested_log_level: ?support.LogLevel = null;
+    var color: ?support.ColorMode = null;
     var backend: Backend = .automatic;
     var options_ended = false;
     var index: usize = 1;
@@ -114,6 +142,34 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         }
         if (!options_ended and std.mem.eql(u8, argument, "--help")) return .help;
         if (!options_ended and std.mem.eql(u8, argument, "--version")) return .version;
+        if (!options_ended and std.mem.eql(u8, argument, "--verbose")) {
+            verbosity = @min(verbosity + 1, 2);
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--log-level")) {
+            if (requested_log_level != null) return .usage;
+            index += 1;
+            if (index == arguments.len) return .usage;
+            requested_log_level = parseLogLevel(arguments[index]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.startsWith(u8, argument, "--log-level=")) {
+            if (requested_log_level != null) return .usage;
+            requested_log_level = parseLogLevel(argument["--log-level=".len..]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.eql(u8, argument, "--color")) {
+            if (color != null) return .usage;
+            index += 1;
+            if (index == arguments.len) return .usage;
+            color = parseColorMode(arguments[index]) orelse return .usage;
+            continue;
+        }
+        if (!options_ended and std.mem.startsWith(u8, argument, "--color=")) {
+            if (color != null) return .usage;
+            color = parseColorMode(argument["--color=".len..]) orelse return .usage;
+            continue;
+        }
         if (!options_ended and std.mem.eql(u8, argument, "--device")) {
             index += 1;
             if (index == arguments.len) return .usage;
@@ -170,6 +226,7 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
                 switch (argument[short_index]) {
                     'h' => return .help,
                     'V' => return .version,
+                    'v' => verbosity = @min(verbosity + 1, 2),
                     'd' => {
                         if (short_index + 1 < argument.len) {
                             requested_address = argument[short_index + 1 ..];
@@ -190,6 +247,13 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         positional_count += 1;
     }
 
+    if (verbosity != 0 and requested_log_level != null) return .usage;
+    const log_level = requested_log_level orelse switch (verbosity) {
+        0 => support.LogLevel.warn,
+        1 => .info,
+        else => .debug,
+    };
+
     if (positional_count == 0) return .usage;
     if (std.mem.eql(u8, positional[0], "serve")) {
         if (positional_count != 1 or backend != .automatic or force) return .usage;
@@ -197,6 +261,8 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
             .requested_address = requested_address,
             .pause_on_removal = pause_on_removal orelse .off,
             .auto_switch = auto_switch orelse .off,
+            .log_level = log_level,
+            .color = color orelse .auto,
         } };
     }
     if (pause_on_removal != null or auto_switch != null) return .usage;
@@ -219,6 +285,8 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
             .requested_address = requested_address,
             .backend = backend,
             .operation = .{ .switching = .{ .action = action, .force = force } },
+            .log_level = log_level,
+            .color = color orelse .auto,
         } };
     }
     if (force) return .usage;
@@ -231,6 +299,8 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
                 battery.Component.parse(positional[1]) orelse return .usage
             else
                 null },
+            .log_level = log_level,
+            .color = color orelse .auto,
         } };
     }
     if (std.mem.eql(u8, positional[0], "wear-status")) {
@@ -239,6 +309,8 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
             .requested_address = requested_address,
             .backend = backend,
             .operation = .wear_status,
+            .log_level = log_level,
+            .color = color orelse .auto,
         } };
     }
 
@@ -264,5 +336,7 @@ pub fn parseInvocation(arguments: []const [:0]const u8) Invocation {
         .requested_address = requested_address,
         .backend = backend,
         .operation = .{ .noise_control = noise_command },
+        .log_level = log_level,
+        .color = color orelse .auto,
     } };
 }
