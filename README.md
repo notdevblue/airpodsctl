@@ -116,7 +116,7 @@ The available commands are:
 
 Wear notifications and host media automation are reverse-engineered and have automated protocol coverage but have not completed the hardware acceptance matrix in [the implementation plan](plans/pause-on-removal.md). `wear-status` therefore remains provisional and fails when the AirPods do not provide a wear snapshot.
 
-The explicitly configured `--pause-on-removal` policy is the only ear-detection automation exposed by airpodsctl and operates directly from AACP wear notifications. Its first valid wear snapshot establishes a baseline and never changes playback. A qualifying removal pauses every bounded MPRIS player reporting `Playing` and supporting pause, regardless of the current PipeWire default sink. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed. While the policy is enabled, the service retries a lost AACP control session with bounded exponential backoff so automation can recover without a client command.
+The explicitly configured `--pause-on-removal` policy is the only ear-detection automation exposed by airpodsctl and operates directly from AACP wear notifications. Its first valid wear snapshot establishes a baseline and never changes playback. A qualifying removal pauses every bounded MPRIS player reporting `Playing` and supporting pause, regardless of the currently selected audio output. Only players whose transition to `Paused` was confirmed and whose D-Bus owner remains unchanged are eligible for automatic resume. Players already paused are never resumed. While the policy is enabled, the service retries a lost AACP control session with bounded exponential backoff so automation can recover without a client command.
 
 ## Experimental multipoint switching
 
@@ -135,7 +135,7 @@ Connect the same AirPods pair to Linux and the iPhone, then enable automatic swi
 $ airpodsctl serve --auto-switch=mpris
 ```
 
-The first MPRIS snapshot is only a baseline and never takes the AirPods. A later player transition to `Playing` requests ownership only when the iPhone is confirmed idle and PipeWire identifies the AirPods as Linux's exact default A2DP sink. Active or unknown remote state, another output, an unknown route, or a failed earlier attempt blocks the takeover. If the iPhone takes the route while Linux remains playing, airpodsctl waits until all tracked players stop and a new play edge occurs instead of fighting the iPhone.
+The first MPRIS snapshot is only a baseline and never takes the AirPods. A later player transition to `Playing` requests ownership when multipoint is ready and the iPhone is confirmed idle. The explicitly enabled MPRIS policy does not inspect the currently selected audio output, so a play edge may request the AirPods even while Linux is routing that player's audio elsewhere. Active or unknown remote state, protocol uncertainty, or a failed earlier attempt blocks the takeover. If the iPhone takes the route while Linux remains playing, airpodsctl waits until all tracked players stop and a new play edge occurs instead of fighting the iPhone.
 
 After any successful take, including an explicit command, ownership is retained while at least one tracked player is playing. It is released after all players have been idle for 30 seconds; playback during that interval cancels the deadline. Losing MPRIS monitoring starts the same fail-safe release timer. A service restart does not infer ownership provenance and takes no action from its initial state.
 
@@ -178,7 +178,7 @@ AirPods Pro 2 may reject the Off command until **Off Listening Mode** has been e
 
 ## Build
 
-The build requires Zig 0.16, `pkg-config`, BlueZ, PipeWire, `libsystemd`, and `dbus-run-session` for the isolated MPRIS test:
+The build requires Zig 0.16, `pkg-config`, BlueZ, `libsystemd`, and `dbus-run-session` for the isolated MPRIS test:
 
 ```console
 $ zig build check

@@ -136,9 +136,11 @@ pub const State = struct {
     }
 
     pub fn updateAudioSource(self: *State, source: AudioSource, local_address: Address) void {
-        if (!std.mem.eql(u8, &source.address, &local_address)) {
-            self.remote_activity = source.state.remoteActivity();
-        }
+        const source_is_local = std.mem.eql(u8, &source.address, &local_address);
+
+        // The reported source identifies the single host currently selected by AirPods routing.
+        self.local_owns = source_is_local;
+        self.remote_activity = if (source_is_local) .idle else source.state.remoteActivity();
     }
 
     pub fn status(self: State) Status {
@@ -185,8 +187,13 @@ pub fn parsePacket(packet: []const u8) error{InvalidRoutingPacket}!?Packet {
     const opcode = std.mem.readInt(u16, packet[4..6], .little);
     if (opcode == audio_source_response_opcode) {
         if (packet.len != 13) return error.InvalidRoutingPacket;
+
+        var address = packet[6..12].*;
+
+        // Audio-source responses use Bluetooth byte order, unlike connected-device entries.
+        std.mem.reverse(u8, &address);
         return .{ .audio_source = .{
-            .address = packet[6..12].*,
+            .address = address,
             .state = @enumFromInt(packet[12]),
         } };
     }

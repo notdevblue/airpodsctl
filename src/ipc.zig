@@ -17,7 +17,8 @@ const response_magic_v2 = "APR2";
 const response_magic_v3 = "APR3";
 const socket_suffix = "/airpodsctl.sock";
 const packet_size = 512;
-const request_timeout_ms = 3000;
+// The service may spend its full three-second AirPods deadline before returning a bounded failure.
+const request_timeout_ms = 5000;
 
 pub const Error = error{ Unavailable, IpcFailure };
 

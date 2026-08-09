@@ -407,7 +407,12 @@ pub fn localAddress(fd: c_int, failure: *support.ErrorMessage) Error![6]u8 {
         failure.set("Bluetooth returned an invalid local control address", .{});
         return error.TransportFailure;
     }
-    return source.l2_bdaddr.b;
+
+    var address = source.l2_bdaddr.b;
+
+    // sockaddr_l2 stores bdaddr least-significant byte first, unlike connected-device routing entries.
+    std.mem.reverse(u8, &address);
+    return address;
 }
 
 // Open Apple's proprietary L2CAP channel without allowing connect to block the deadline.

@@ -18,6 +18,7 @@ pub const State = struct {
     wear_generation: u64 = 0,
     routing: smart_routing.State = .{},
     routing_generation: u64 = 0,
+    audio_source_generation: u64 = 0,
     connected_devices_generation: u64 = 0,
     ownership_generation: u64 = 0,
 };
@@ -116,6 +117,7 @@ pub const Controller = struct {
             switch (routing_packet) {
                 .audio_source => |source| if (self.local_address) |local| {
                     self.state.routing.updateAudioSource(source, local);
+                    self.state.audio_source_generation +%= 1;
                 },
                 .connected_devices => |devices| {
                     if (self.local_address) |local| {
@@ -160,9 +162,12 @@ pub const Controller = struct {
             return error.ProtocolFailure;
         }
 
-        const previous_generation = self.state.connected_devices_generation;
+        const previous_audio_source_generation = self.state.audio_source_generation;
+        const previous_connected_devices_generation = self.state.connected_devices_generation;
         try smart_routing.requestStatus(&self.session);
-        while (self.state.connected_devices_generation == previous_generation) {
+        while (self.state.audio_source_generation == previous_audio_source_generation or
+            self.state.connected_devices_generation == previous_connected_devices_generation)
+        {
             try self.receiveObserved(observer);
         }
         return self.state.routing.status();

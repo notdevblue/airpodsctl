@@ -7,7 +7,6 @@ const controller = @import("controller");
 const ipc = @import("ipc");
 const noise_control = @import("noise_control");
 const operations = @import("command");
-const pipewire_route = @import("pipewire_route");
 const smart_routing = @import("smart_routing");
 const support = @import("support");
 const switching_policy = @import("switching_policy");
@@ -279,7 +278,7 @@ fn sendRoutingSnapshot(fd: c_int, exchange: *const RoutingExchange) bool {
     const connected_devices_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x2d, 0x00 };
     const audio_source = [_]u8{
         0x04,                            0x00, 0x04, 0x00, 0x0e, 0x00,
-        7,                               8,    9,    10,   11,   12,
+        12,                              11,   10,   9,    8,    7,
         @intFromEnum(exchange.activity),
     };
     const connected_devices = [_]u8{
@@ -798,7 +797,7 @@ test "smart-routing packets are exact and bounded" {
     const remote = smart_routing.Address{ 7, 8, 9, 10, 11, 12 };
     const audio_idle = [_]u8{
         0x04, 0x00, 0x04, 0x00, 0x0e, 0x00,
-        7,    8,    9,    10,   11,   12,
+        12,   11,   10,   9,    8,    7,
         0,
     };
     const connected = [_]u8{
@@ -848,7 +847,12 @@ test "smart-routing state fails closed" {
     try std.testing.expectEqual(smart_routing.RemoteActivity.idle, state.status().remote_activity);
     try std.testing.expectEqualStrings("ready", state.status().multipointName());
 
+    state.updateAudioSource(.{ .address = local, .state = .playing }, local);
+    try std.testing.expectEqual(smart_routing.Owner.linux, state.status().owner);
+    try std.testing.expectEqual(smart_routing.RemoteActivity.idle, state.status().remote_activity);
+
     state.updateAudioSource(.{ .address = devices.addresses[1], .state = .in_call }, local);
+    try std.testing.expectEqual(smart_routing.Owner.remote, state.status().owner);
     try std.testing.expectEqual(smart_routing.RemoteActivity.active, state.status().remote_activity);
     state.updateAudioSource(.{ .address = devices.addresses[1], .state = @enumFromInt(0xff) }, local);
     try std.testing.expectEqual(smart_routing.RemoteActivity.unknown, state.status().remote_activity);
@@ -923,7 +927,6 @@ test "manual switching requires safe state and a matching acknowledgement" {
 
 test "switching policy waits for safe playback edges and releases after idle" {
     const eligible = switching_policy.Eligibility{
-        .route_selected = true,
         .multipoint_ready = true,
         .remote_idle = true,
     };
@@ -942,12 +945,10 @@ test "switching policy waits for safe playback edges and releases after idle" {
 
 test "switching policy suppresses unsafe and contested takeovers" {
     const blocked = switching_policy.Eligibility{
-        .route_selected = true,
         .multipoint_ready = true,
         .remote_idle = false,
     };
     const eligible = switching_policy.Eligibility{
-        .route_selected = true,
         .multipoint_ready = true,
         .remote_idle = true,
     };
@@ -969,7 +970,6 @@ test "switching policy suppresses unsafe and contested takeovers" {
 
 test "manual switching ownership adopts the first playback baseline" {
     const blocked = switching_policy.Eligibility{
-        .route_selected = false,
         .multipoint_ready = false,
         .remote_idle = false,
     };
@@ -1062,47 +1062,4 @@ test "wear policy baselines snapshots, transitions, and resets conservatively" {
     try std.testing.expectEqual(wear_policy.Reason.resume_not_owned, unowned_resume.reason);
     try std.testing.expectEqual(wear_policy.Decision.none, unowned_resume.decision);
     try std.testing.expectEqual(wear_policy.Reason.incomplete_state, incomplete.reason);
-}
-
-test "PipeWire route classification requires the exact selected A2DP sink" {
-    try std.testing.expectEqual(
-        pipewire_route.RouteState.selected,
-        pipewire_route.classify(
-            "bluez_output.airpods",
-            "bluez_output.airpods",
-            "18:3F:70:6F:A1:06",
-            true,
-            "18:3f:70:6f:a1:06",
-        ),
-    );
-    try std.testing.expectEqual(
-        pipewire_route.RouteState.other,
-        pipewire_route.classify(
-            "bluez_output.other",
-            "bluez_output.other",
-            "AA:BB:CC:DD:EE:FF",
-            true,
-            "18:3F:70:6F:A1:06",
-        ),
-    );
-    try std.testing.expectEqual(
-        pipewire_route.RouteState.other,
-        pipewire_route.classify(
-            "bluez_output.airpods",
-            "bluez_output.airpods",
-            "18:3F:70:6F:A1:06",
-            false,
-            "18:3F:70:6F:A1:06",
-        ),
-    );
-    try std.testing.expectEqual(
-        pipewire_route.RouteState.unknown,
-        pipewire_route.classify(
-            "virtual_filter",
-            "bluez_output.airpods",
-            "18:3F:70:6F:A1:06",
-            true,
-            "18:3F:70:6F:A1:06",
-        ),
-    );
 }

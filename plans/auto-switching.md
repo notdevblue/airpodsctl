@@ -13,7 +13,7 @@ The first release proceeds in two stages:
 
 ## Implementation status
 
-The parser, controller state, manual commands, IPC v3, MPRIS policy, default-sink guard, reconnect behavior, and automated tests are implemented. Hardware capture and acceptance remain incomplete, so the commands are experimental, automation stays off by default, and a public release must retain the validation gate below.
+The parser, controller state, manual commands, IPC v3, MPRIS policy, reconnect behavior, and automated tests are implemented. Hardware capture and acceptance remain incomplete, so the commands are experimental, automation stays off by default, and a public release must retain the validation gate below.
 
 ## Public interface and behavior
 
@@ -88,12 +88,11 @@ Automatic takeover occurs only when all conditions are true:
 - `--auto-switch=mpris` is enabled.
 - A player newly transitions to `Playing`; a newly appearing player already reporting `Playing` also counts.
 - The event is not part of the initial service, MPRIS, or AACP snapshot.
-- PipeWire identifies the selected AirPods as the exact default A2DP sink.
 - Multipoint and ownership state are known.
 - Remote activity is confirmed idle.
 - Automation is not suppressed by a recent explicit release, remote takeover, or failed takeover.
 
-Unknown PipeWire routing, another default sink, protocol uncertainty, or active remote audio blocks automatic takeover. Becoming eligible later while the player remains `Playing` does not trigger retrospectively; another play edge is required.
+The explicitly enabled MPRIS policy does not inspect the currently selected audio output. A qualifying play edge may therefore request the AirPods while that player's audio is routed elsewhere. Protocol uncertainty or active remote audio blocks automatic takeover. Becoming eligible later while the player remains `Playing` does not trigger retrospectively; another play edge is required.
 
 After any successful service-initiated take—manual or automatic:
 
@@ -106,7 +105,7 @@ After any successful service-initiated take—manual or automatic:
 - If the iPhone takes ownership while Linux still reports `Playing`, treat it as intentional: cancel local ownership state and suppress automatic retaking until all players stop and a later play edge occurs.
 - Service startup and reconnection never take or release based solely on the initial snapshot.
 
-Reuse the existing PipeWire default-sink monitor as a guard; MPRIS remains the trigger. Do not add PipeWire stream-triggered switching in this version.
+MPRIS is the sole desktop playback trigger. Do not add audio-server route monitoring or stream-triggered switching in this version.
 
 ### Setup and safety
 
@@ -124,14 +123,14 @@ Automated coverage includes:
 
 - Exact packet fixtures for every confirmed routing message, including truncation, oversized payloads, invalid reserved bytes, unknown values, address order, and unrelated interleaved notifications.
 - Controller tests proving generation-based acknowledgements, timeout handling, single-reader behavior, reconnect reset, and no duplicate mutations.
-- A pure switching-policy matrix covering initial snapshots, normal and forced take, explicit release, active or unknown remote state, wrong or unknown default sink, multiple MPRIS players, the 30-second timer, failed operations, remote takeover suppression, and MPRIS or PipeWire loss.
+- A pure switching-policy matrix covering initial snapshots, normal and forced take, explicit release, active or unknown remote state, multiple MPRIS players, the 30-second timer, failed operations, remote takeover suppression, and MPRIS loss.
 - Injected monotonic time so timer tests do not sleep.
 - CLI tests for valid forms, misplaced or duplicate `--force`, service-only mutations, and `--auto-switch` validation.
 - IPC v3 round trips and clear adjacent-version incompatibility errors.
 - Isolated MPRIS tests for existing players, newly appearing players, owner replacement, status invalidation, and preservation of wear-aware pause ownership.
 - Existing `zig build check` and release builds after every commit.
 
-Hardware acceptance uses AirPods Pro 2 USB-C and an iPhone, recording AirPods firmware, iPhone model and iOS version, BlueZ, PipeWire, and WirePlumber versions. Verify that both hosts remain connected across take and release, calls are never taken automatically, startup snapshots cause no action, the exact default-sink guard is enforced, idle release waits 30 seconds, and remote takeover is not fought.
+Hardware acceptance uses AirPods Pro 2 USB-C and an iPhone, recording AirPods firmware, iPhone model and iOS version, and BlueZ version. Verify that both hosts remain connected across take and release, calls are never taken automatically, startup snapshots cause no action, a qualifying MPRIS edge does not depend on the selected Linux output, idle release waits 30 seconds, and remote takeover is not fought.
 
 ## Assumptions and exclusions
 

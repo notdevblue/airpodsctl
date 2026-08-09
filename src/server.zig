@@ -5,7 +5,6 @@ const cli = @import("cli");
 const controller = @import("controller");
 const ipc = @import("ipc");
 const media = @import("media");
-const pipewire_route = @import("pipewire_route");
 const support = @import("support");
 const switching_policy = @import("switching_policy");
 const transport = @import("transport");
@@ -13,6 +12,7 @@ const wear_policy = @import("wear_policy");
 
 const c = support.c;
 const operation_timeout_ms = 3000;
+const ipc_reply_timeout_ms = 1000;
 const initialization_delay_ms = 150;
 const idle_poll_ms = 1000;
 const max_reconnect_delay_ms = 30_000;
@@ -41,10 +41,6 @@ const Server = struct {
     media_available: ?bool = null,
     logged_playing: ?bool = null,
     media_retry_at_ms: i64 = 0,
-    route: ?pipewire_route.Monitor = null,
-    route_available: ?bool = null,
-    logged_route_state: ?pipewire_route.RouteState = null,
-    route_retry_at_ms: i64 = 0,
     reconnect_at_ms: i64 = 0,
     reconnect_delay_ms: i64 = idle_poll_ms,
     failure: support.ErrorMessage = .{},
@@ -77,93 +73,13 @@ const Server = struct {
         support.warn(message);
     }
 
-    fn logRouteState(self: *Server) void {
-        const state = if (self.route) |*route| route.state() else return;
-        if (self.logged_route_state != null and self.logged_route_state.? == state) return;
-
-        self.logged_route_state = state;
-        switch (state) {
-            .selected => support.log(
-                .info,
-                "AirPods are the active audio output because PipeWire reports their exact A2DP sink as the default.",
-                .{},
-            ),
-            .other => support.log(
-                .info,
-                "Automatic switching is suppressed because PipeWire reports a different default audio output.",
-                .{},
-            ),
-            .unknown => support.log(
-                .info,
-                "Automatic switching is suppressed because PipeWire cannot identify an exact default AirPods A2DP sink.",
-                .{},
-            ),
-        }
-    }
-
-    fn closeRoute(self: *Server) void {
-        if (self.route) |*route| {
-            route.deinit();
-            support.log(
-                .debug,
-                "Closed the PipeWire route monitor because its state is no longer reliable for automatic switching.",
-                .{},
-            );
-        }
-        self.route = null;
-        self.route_available = false;
-        self.logged_route_state = null;
-        self.route_retry_at_ms = transport.nowMs() + idle_poll_ms;
-    }
-
-    fn ensureRoute(self: *Server) void {
-        if (self.switching.mode != .mpris or self.route != null or self.connection == null or
-            transport.nowMs() < self.route_retry_at_ms)
-        {
-            return;
-        }
-        if (self.route_available == null or self.route_available.?) {
-            support.log(
-                .debug,
-                "Starting PipeWire route monitoring because automatic switching requires an exact default AirPods A2DP sink.",
-                .{},
-            );
-        }
-        self.route = .{};
-        self.route.?.init(self.connection.?.address.text) catch {
-            self.route = null;
-            self.route_retry_at_ms = transport.nowMs() + idle_poll_ms;
-            if (self.route_available == null or self.route_available.?) support.log(
-                .warn,
-                "PipeWire route monitoring is unavailable, so automatic switching is suppressed; retrying in {d} ms.",
-                .{idle_poll_ms},
-            );
-            self.route_available = false;
-            return;
-        };
-        if (self.route_available == null or !self.route_available.?) {
-            support.log(
-                .debug,
-                "PipeWire route monitoring is available because the registry and default-sink listeners initialized successfully.",
-                .{},
-            );
-        }
-        self.route_available = true;
-        self.logRouteState();
-    }
-
-    fn selectedRoute(self: *const Server) bool {
-        return if (self.route) |*route| route.state() == .selected else false;
-    }
-
     fn switchingEligibility(self: *const Server) switching_policy.Eligibility {
         const status = if (self.connection) |connection|
             connection.control.state.routing.status()
         else
-            return .{ .route_selected = false, .multipoint_ready = false, .remote_idle = false };
+            return .{ .multipoint_ready = false, .remote_idle = false };
 
         return .{
-            .route_selected = self.selectedRoute(),
             .multipoint_ready = status.isReady(),
             .remote_idle = status.remote_activity == .idle,
         };
@@ -358,7 +274,6 @@ const Server = struct {
             "The service connection is usable because Bluetooth, AACP, local-address discovery, and required routing initialization succeeded.",
             .{},
         );
-        self.ensureRoute();
     }
 
     fn ensureConnection(self: *Server) void {
@@ -384,7 +299,7 @@ const Server = struct {
         support.emit(
             .info,
             if (action == .take)
-                "Requesting AirPods audio ownership because a new MPRIS Playing edge satisfied the route, multipoint, remote-idle, and suppression checks."
+                "Requesting AirPods audio ownership because a new MPRIS Playing edge satisfied the multipoint, remote-idle, and suppression checks."
             else
                 "Releasing AirPods audio ownership because all tracked MPRIS players remained idle for 30 seconds after an automatic take.",
         );
@@ -447,9 +362,8 @@ const Server = struct {
         );
         if (update.play_edge) support.log(
             .debug,
-            "Evaluated a new MPRIS Playing edge: AirPods route {s}, multipoint {s}, remote host {s}; decision '{s}' because automatic take requires all three conditions and no active suppression.",
+            "Evaluated a new MPRIS Playing edge: multipoint {s}, remote host {s}; decision '{s}' because automatic take requires both conditions and no active suppression.",
             .{
-                if (eligibility.route_selected) "selected" else "not selected",
                 if (eligibility.multipoint_ready) "ready" else "not ready",
                 if (eligibility.remote_idle) "idle" else "active or unknown",
                 @tagName(action),
@@ -492,7 +406,7 @@ const Server = struct {
                     transport.nowMs(),
                     false,
                     false,
-                    .{ .route_selected = false, .multipoint_ready = false, .remote_idle = false },
+                    .{ .multipoint_ready = false, .remote_idle = false },
                 );
             }
             return;
@@ -512,7 +426,6 @@ const Server = struct {
     fn replyFailure(
         self: *Server,
         client: c_int,
-        deadline_ms: i64,
         version: ipc.ProtocolVersion,
     ) void {
         var packet: [512]u8 = undefined;
@@ -521,7 +434,7 @@ const Server = struct {
         ipc.sendPacket(
             client,
             ipc.encodeFailureForVersion(&packet, self.failure.text(), version),
-            deadline_ms,
+            transport.nowMs() + ipc_reply_timeout_ms,
             &ignored,
         ) catch {};
     }
@@ -536,7 +449,7 @@ const Server = struct {
                     "Rejected a session client because its request could not be received before the bounded IPC deadline.",
                     .{},
                 );
-                self.replyFailure(client, deadline_ms, .v1);
+                self.replyFailure(client, .v1);
                 return;
             },
         ) catch {
@@ -546,7 +459,7 @@ const Server = struct {
                 "Rejected a session client because its packet did not decode as a supported versioned operation.",
                 .{},
             );
-            self.replyFailure(client, deadline_ms, .v1);
+            self.replyFailure(client, .v1);
             return;
         };
         support.log(
@@ -561,7 +474,7 @@ const Server = struct {
                 "The session client's '{s}' request could not run because no AirPods control session could be initialized.",
                 .{request.operation.name()},
             );
-            self.replyFailure(client, deadline_ms, request.version);
+            self.replyFailure(client, request.version);
             return;
         };
         if (request.requested_address) |requested| {
@@ -575,7 +488,7 @@ const Server = struct {
                     "Rejected the session client because its requested device does not match the AirPods pair owned by this service.",
                     .{},
                 );
-                self.replyFailure(client, deadline_ms, request.version);
+                self.replyFailure(client, request.version);
                 return;
             }
         }
@@ -589,7 +502,7 @@ const Server = struct {
                 "The session client's '{s}' request failed because the AirPods protocol exchange did not produce a valid acknowledgement before the deadline.",
                 .{request.operation.name()},
             );
-            self.replyFailure(client, deadline_ms, request.version);
+            self.replyFailure(client, request.version);
 
             // A protocol failure leaves the stream and cached state unreliable; let policy recovery reconnect it.
             self.disconnect();
@@ -618,7 +531,7 @@ const Server = struct {
             &packet,
             result,
             request.version,
-        ), deadline_ms, &self.failure) catch {
+        ), transport.nowMs() + ipc_reply_timeout_ms, &self.failure) catch {
             support.log(
                 .warn,
                 "The '{s}' result could not be returned because the session client closed or stopped reading its local socket.",
@@ -654,7 +567,6 @@ const Server = struct {
 
         while ((@as(*volatile c.sig_atomic_t, &stop_requested)).* == 0) {
             self.ensureConnection();
-            self.ensureRoute();
             self.ensurePlayback();
             var descriptors = [_]c.struct_pollfd{
                 .{ .fd = listener, .events = c.POLLIN, .revents = 0 },
@@ -666,11 +578,6 @@ const Server = struct {
                 .{
                     .fd = self.players.fd(),
                     .events = self.players.events(),
-                    .revents = 0,
-                },
-                .{
-                    .fd = if (self.route) |*route| route.fd() else -1,
-                    .events = c.POLLIN,
                     .revents = 0,
                 },
             };
@@ -709,24 +616,6 @@ const Server = struct {
                     self.media_retry_at_ms = transport.nowMs() + idle_poll_ms;
                 };
                 self.ensurePlayback();
-            }
-            if (descriptors[3].revents & c.POLLIN != 0) {
-                if (self.route) |*route| route.dispatch() catch {
-                    support.log(
-                        .warn,
-                        "PipeWire route monitoring was reset because dispatch failed; automatic switching remains suppressed until monitoring recovers.",
-                        .{},
-                    );
-                    self.closeRoute();
-                };
-                self.logRouteState();
-            } else if (descriptors[3].revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL) != 0) {
-                support.log(
-                    .warn,
-                    "PipeWire route monitoring was reset because poll reported an error or hangup; automatic switching remains suppressed until monitoring recovers.",
-                    .{},
-                );
-                self.closeRoute();
             }
             if (descriptors[0].revents & c.POLLIN != 0) {
                 // Handle one bounded request at a time so setter acknowledgements remain ordered.
@@ -774,7 +663,6 @@ pub fn run(configuration: cli.ServeCommand, failure: *support.ErrorMessage) Erro
     };
     defer {
         service.disconnect();
-        service.closeRoute();
         service.players.deinit();
     }
     service.run(listener) catch {

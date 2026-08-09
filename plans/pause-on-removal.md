@@ -60,7 +60,7 @@ The secondary earbud may become primary after removal. Playback decisions theref
 
 ## Transition policy
 
-The pure policy consumes stable aggregate wear counts and owns no Bluetooth, PipeWire, D-Bus, or player state directly.
+The pure policy consumes stable aggregate wear counts and owns no Bluetooth, D-Bus, or player state directly.
 
 | Policy | Pause transition | Resume transition |
 | --- | --- | --- |
@@ -81,9 +81,9 @@ Required behavior:
 
 ## Host-wide action scope
 
-Pause-on-removal is an explicitly enabled host policy and does not depend on the PipeWire default sink. A qualifying wear transition may therefore pause eligible MPRIS players even when another physical or virtual output is selected, the AirPods use a non-A2DP profile, or PipeWire is unavailable.
+Pause-on-removal is an explicitly enabled host policy and does not depend on the currently selected audio output. A qualifying wear transition may therefore pause eligible MPRIS players even when another physical or virtual output is selected or the AirPods use a non-A2DP profile.
 
-This behavior is intentional: wear notifications establish that the configured AirPods were removed, while the opt-in policy defines that event as a request to pause host media generally. PipeWire route monitoring remains a separate safety requirement for experimental automatic multipoint switching.
+This behavior is intentional: wear notifications establish that the configured AirPods were removed, while the opt-in policy defines that event as a request to pause host media generally.
 
 ## MPRIS ownership
 
@@ -159,6 +159,6 @@ This feature does not:
 - infer device configuration from missing notifications;
 - scan BLE proximity advertisements;
 - relabel primary/secondary as left/right without verified orientation data;
-- change BlueZ profiles or the PipeWire default sink;
+- change BlueZ profiles or the default audio output;
 - pause media unless the policy is explicitly enabled;
 - resume media that airpodsctl did not confirm it had paused.

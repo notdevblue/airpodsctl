@@ -134,18 +134,6 @@ pub fn build(builder: *std.Build) void {
     media_module.addImport("transport", transport_module);
     media_module.linkSystemLibrary("libsystemd", .{});
 
-    const pipewire_route_module = builder.createModule(.{
-        .root_source_file = builder.path("src/pipewire_route.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    pipewire_route_module.addIncludePath(builder.path("src"));
-    pipewire_route_module.addCSourceFile(.{
-        .file = builder.path("src/pipewire_route_shim.c"),
-        .flags = &.{ "-Wall", "-Wextra", "-Werror" },
-    });
-    pipewire_route_module.linkSystemLibrary("pipewire-0.3", .{});
-
     const app_module = builder.createModule(.{
         .root_source_file = builder.path("src/app.zig"),
         .target = target,
@@ -184,7 +172,6 @@ pub fn build(builder: *std.Build) void {
     server_module.addImport("controller", controller_module);
     server_module.addImport("ipc", ipc_module);
     server_module.addImport("media", media_module);
-    server_module.addImport("pipewire_route", pipewire_route_module);
     server_module.addImport("support", support_module);
     server_module.addImport("switching_policy", switching_policy_module);
     server_module.addImport("transport", transport_module);
@@ -208,7 +195,6 @@ pub fn build(builder: *std.Build) void {
     executable_module.link_libc = true;
     executable_module.linkSystemLibrary("bluetooth", .{});
     executable_module.linkSystemLibrary("libsystemd", .{});
-    executable_module.linkSystemLibrary("pipewire-0.3", .{});
 
     const executable = builder.addExecutable(.{
         .name = "airpodsctl",
@@ -232,7 +218,6 @@ pub fn build(builder: *std.Build) void {
     test_module.addImport("wear_detection", wear_detection_module);
     test_module.addImport("ipc", ipc_module);
     test_module.addImport("noise_control", noise_control_module);
-    test_module.addImport("pipewire_route", pipewire_route_module);
     test_module.addImport("smart_routing", smart_routing_module);
     test_module.addImport("support", support_module);
     test_module.addImport("switching_policy", switching_policy_module);

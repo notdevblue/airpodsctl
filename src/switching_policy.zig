@@ -10,12 +10,11 @@ pub const Action = enum {
 };
 
 pub const Eligibility = struct {
-    route_selected: bool,
     multipoint_ready: bool,
     remote_idle: bool,
 
     pub fn allowsTake(self: Eligibility) bool {
-        return self.route_selected and self.multipoint_ready and self.remote_idle;
+        return self.multipoint_ready and self.remote_idle;
     }
 };
 

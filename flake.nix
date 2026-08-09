@@ -31,7 +31,6 @@
             ];
             buildInputs = [
               pkgs.bluez
-              pkgs.pipewire
               pkgs.systemd
             ];
 
@@ -90,7 +89,6 @@
               pkgs.bluez
               pkgs.dbus
               pkgs.pkg-config
-              pkgs.pipewire
               pkgs.systemd
               pkgs.zig_0_16
             ];
