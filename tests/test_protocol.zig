@@ -80,6 +80,7 @@ const PersistentEmulatorContext = struct {
 const RoutingExchange = struct {
     request: operations.Switching,
     initial_owner: bool,
+    send_initial_ownership: bool = true,
     activity: smart_routing.AudioSourceState,
     acknowledge: bool = true,
 };
@@ -290,15 +291,15 @@ fn sendRoutingSnapshot(fd: c_int, exchange: *const RoutingExchange) bool {
     return receiveExpected(fd, &audio_source_request) and
         c.send(fd, &audio_source, audio_source.len, 0) == audio_source.len and
         receiveExpected(fd, &connected_devices_request) and
-        sendOwnership(fd, exchange.initial_owner) and
+        (!exchange.send_initial_ownership or sendOwnership(fd, exchange.initial_owner)) and
         c.send(fd, &connected_devices, connected_devices.len, 0) == connected_devices.len;
 }
 
 fn emulateRoutingExchange(fd: c_int, exchange: *const RoutingExchange) u8 {
     if (!receiveInitialization(fd) or !sendRoutingSnapshot(fd, exchange)) return 1;
     if (exchange.request.action == .status or
-        (exchange.request.action == .take and exchange.initial_owner) or
-        (exchange.request.action == .release and !exchange.initial_owner) or
+        (exchange.send_initial_ownership and exchange.request.action == .take and exchange.initial_owner) or
+        (exchange.send_initial_ownership and exchange.request.action == .release and !exchange.initial_owner) or
         (exchange.request.action == .take and !exchange.request.force and exchange.activity != .idle))
     {
         return 0;
@@ -847,13 +848,22 @@ test "smart-routing state fails closed" {
     try std.testing.expectEqual(smart_routing.RemoteActivity.idle, state.status().remote_activity);
     try std.testing.expectEqualStrings("ready", state.status().multipointName());
 
+    state.updateOwnership(true);
     state.updateAudioSource(.{ .address = local, .state = .playing }, local);
     try std.testing.expectEqual(smart_routing.Owner.linux, state.status().owner);
     try std.testing.expectEqual(smart_routing.RemoteActivity.idle, state.status().remote_activity);
 
+    state.updateAudioSource(.{ .address = .{ 0, 0, 0, 0, 0, 0 }, .state = .idle }, local);
+    try std.testing.expectEqual(smart_routing.Owner.linux, state.status().owner);
+    try std.testing.expectEqual(true, state.confirmed_owns);
+
     state.updateAudioSource(.{ .address = devices.addresses[1], .state = .in_call }, local);
     try std.testing.expectEqual(smart_routing.Owner.remote, state.status().owner);
     try std.testing.expectEqual(smart_routing.RemoteActivity.active, state.status().remote_activity);
+    try std.testing.expectEqual(false, state.confirmed_owns);
+
+    state.updateAudioSource(.{ .address = local, .state = .playing }, local);
+    try std.testing.expectEqual(smart_routing.Owner.remote, state.status().owner);
     state.updateAudioSource(.{ .address = devices.addresses[1], .state = @enumFromInt(0xff) }, local);
     try std.testing.expectEqual(smart_routing.RemoteActivity.unknown, state.status().remote_activity);
     state.reset();
@@ -892,6 +902,14 @@ test "manual switching requires safe state and a matching acknowledgement" {
         .activity = .idle,
     });
     try std.testing.expectEqual(smart_routing.Owner.linux, take_result.result.?.owner);
+
+    const unconfirmed_local_take = try runRoutingExchange(&.{
+        .request = .{ .action = .take },
+        .initial_owner = true,
+        .send_initial_ownership = false,
+        .activity = .idle,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.linux, unconfirmed_local_take.result.?.owner);
 
     const release_result = try runRoutingExchange(&.{
         .request = .{ .action = .release },

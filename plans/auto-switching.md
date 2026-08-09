@@ -61,13 +61,15 @@ The following layouts are protocol research inputs, not completed hardware accep
 | --- | --- | --- |
 | `0x0009` | Both | Fixed control-command frame. Identifier `0x06` carries local ownership as `0x00` or `0x01`; the remaining three value bytes are zero. |
 | `0x000d` | Host to AirPods | Empty Audio Source request. |
-| `0x000e` | AirPods to host | Six-byte Bluetooth address followed by source state: `0x00` idle, `0x01` call, or `0x02` media. Other states remain unknown. |
+| `0x000e` | AirPods to host | Six-byte Bluetooth address followed by source state: `0x00` idle, `0x01` call, or `0x02` media. An all-zero address reports that neither host is actively streaming and must not overwrite separately acknowledged ownership. Other states remain unknown. |
 | `0x0010`/`0x0011` | Both | Six-byte address, little-endian payload length, one unknown byte, and an opaque OPACK payload. Version 1 does not interpret or emit these messages. |
 | `0x0014` | Host to AirPods | Count followed by six-byte addresses forming a connection-priority list. Version 1 does not change this list. |
 | `0x002d` | Host to AirPods | Empty Connected Devices request. |
 | `0x002e` | AirPods to host | Two unknown bytes, device count, then count entries containing a six-byte address and two unknown bytes. Accept at most two entries. |
 
 All packets use the existing `04 00 04 00` AACP prefix and a little-endian 16-bit opcode. Initial implementation compares reported addresses with the local L2CAP address in Bluetooth byte order, but this remains a hardware acceptance item. A routing mutation is provisional until a capture proves that a newer `0x09` ownership notification acknowledges it and that `0x000e` reliably describes the other host's activity.
+
+Live AirPods Pro 2 USB-C captures on 2026-08-09 confirmed that `0x09` identifier `0x06` produces matching `0x01` and `0x00` acknowledgements when arbitration ownership changes. They also confirmed that an idle local `0x000e` source can exist before Linux has received an ownership acknowledgement, and that an all-zero `0x000e` source can follow a confirmed take without relinquishing ownership. The controller must therefore track acknowledged arbitration ownership independently from active-source observations. The broader firmware, call, reconnect, and model acceptance matrix remains incomplete.
 
 ## Implementation design
 

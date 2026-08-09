@@ -608,15 +608,22 @@ const Server = struct {
                 );
                 self.disconnect();
             }
-            if (descriptors[2].revents != 0) {
+            if (descriptors[2].revents & (c.POLLERR | c.POLLHUP | c.POLLNVAL) != 0) {
+                self.players.deinit();
+                self.warnMedia("MPRIS monitoring was reset because poll reported an error or hangup on the user D-Bus connection; retrying after the bounded media backoff.");
+                self.media_available = false;
+                self.logged_playing = null;
+                self.media_retry_at_ms = transport.nowMs() + idle_poll_ms;
+            } else {
+                // sd-bus can have queued messages while its requested poll event mask is zero.
                 self.players.dispatch() catch {
                     self.warnMedia("MPRIS monitoring was reset because the user D-Bus dispatcher failed; retrying after the bounded media backoff.");
                     self.media_available = false;
                     self.logged_playing = null;
                     self.media_retry_at_ms = transport.nowMs() + idle_poll_ms;
                 };
-                self.ensurePlayback();
             }
+            self.ensurePlayback();
             if (descriptors[0].revents & c.POLLIN != 0) {
                 // Handle one bounded request at a time so setter acknowledgements remain ordered.
                 const client = ipc.acceptClient(listener, &self.failure) catch {

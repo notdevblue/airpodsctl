@@ -5,17 +5,24 @@ const c = @cImport({
     @cInclude("fake_mpris.h");
 });
 
+fn pollAndDispatch(controller: *media.Controller) !void {
+    var descriptors = [_]std.posix.pollfd{.{
+        .fd = controller.fd(),
+        .events = controller.events(),
+        .revents = 0,
+    }};
+
+    _ = try std.posix.poll(&descriptors, 50);
+
+    // Match the server loop: sd-bus may queue work without requesting a poll event.
+    try controller.dispatch();
+}
+
 fn waitForOwnership(controller: *media.Controller, expected: bool) !void {
     for (0..20) |_| {
         if (controller.hasOwnership() == expected) return;
-        var descriptors = [_]std.posix.pollfd{.{
-            .fd = controller.fd(),
-            .events = controller.events(),
-            .revents = 0,
-        }};
 
-        _ = try std.posix.poll(&descriptors, 50);
-        try controller.dispatch();
+        try pollAndDispatch(controller);
     }
 
     try std.testing.expectEqual(expected, controller.hasOwnership());
@@ -27,14 +34,7 @@ fn waitForPlaybackUpdate(
     expected_edge: bool,
 ) !void {
     for (0..20) |_| {
-        var descriptors = [_]std.posix.pollfd{.{
-            .fd = controller.fd(),
-            .events = controller.events(),
-            .revents = 0,
-        }};
-
-        _ = try std.posix.poll(&descriptors, 50);
-        try controller.dispatch();
+        try pollAndDispatch(controller);
         const update = try controller.monitorPlayback();
         if (update.playing == expected_playing and update.play_edge == expected_edge) return;
     }

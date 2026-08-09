@@ -189,7 +189,7 @@ pub const Controller = struct {
                     );
                     return error.ProtocolFailure;
                 }
-                if (status.owner == .linux) return .{ .switching = status };
+                if (self.state.routing.confirmed_owns == true) return .{ .switching = status };
                 if (!request.force and (status.owner == .unknown or status.remote_activity != .idle)) {
                     self.session.channel.failure.set(
                         "remote AirPods activity is not confirmed idle; use switching take --force to override it",
@@ -199,7 +199,12 @@ pub const Controller = struct {
                 }
             },
             .release => {
-                if (status.owner == .remote or status.owner == .none) return .{ .switching = status };
+                if (self.state.routing.confirmed_owns == false or
+                    (self.state.routing.confirmed_owns == null and
+                        (status.owner == .remote or status.owner == .none)))
+                {
+                    return .{ .switching = status };
+                }
                 if (status.owner == .unknown) {
                     self.session.channel.failure.set("AirPods routing ownership is unknown", .{});
                     return error.ProtocolFailure;
@@ -210,8 +215,15 @@ pub const Controller = struct {
         const target_owns = request.action == .take;
         const previous_generation = self.state.ownership_generation;
         try smart_routing.setOwnership(&self.session, target_owns);
+
+        // An unconfirmed release is idempotent: no notification is emitted when owns=0 was already set.
+        if (!target_owns and self.state.routing.confirmed_owns == null) {
+            self.state.routing.updateOwnership(false);
+            return .{ .switching = self.state.routing.status() };
+        }
         while (self.state.ownership_generation == previous_generation or
-            self.state.routing.local_owns == null or self.state.routing.local_owns.? != target_owns)
+            self.state.routing.confirmed_owns == null or
+            self.state.routing.confirmed_owns.? != target_owns)
         {
             self.receiveObserved(observer) catch |failure| {
                 self.session.channel.failure.set(

@@ -106,6 +106,7 @@ pub const Status = struct {
 pub const State = struct {
     hosts: Hosts = .unknown,
     local_owns: ?bool = null,
+    confirmed_owns: ?bool = null,
     remote_activity: RemoteActivity = .unknown,
 
     pub fn reset(self: *State) void {
@@ -114,6 +115,8 @@ pub const State = struct {
 
     pub fn updateOwnership(self: *State, owns: bool) void {
         self.local_owns = owns;
+        self.confirmed_owns = owns;
+        if (owns) self.remote_activity = .idle;
     }
 
     pub fn updateConnectedDevices(
@@ -136,11 +139,24 @@ pub const State = struct {
     }
 
     pub fn updateAudioSource(self: *State, source: AudioSource, local_address: Address) void {
+        // AirPods use an all-zero address to report that neither host is actively streaming.
+        if (std.mem.allEqual(u8, &source.address, 0)) {
+            self.remote_activity = .idle;
+            return;
+        }
+
         const source_is_local = std.mem.eql(u8, &source.address, &local_address);
 
-        // The reported source identifies the single host currently selected by AirPods routing.
-        self.local_owns = source_is_local;
-        self.remote_activity = if (source_is_local) .idle else source.state.remoteActivity();
+        if (source_is_local) {
+            // A local source is only an ownership hint until AirPods acknowledge owns=1.
+            if (self.confirmed_owns != false) self.local_owns = true;
+            self.remote_activity = .idle;
+        } else {
+            // A selected remote source proves that Linux no longer owns routing arbitration.
+            self.local_owns = false;
+            self.confirmed_owns = false;
+            self.remote_activity = source.state.remoteActivity();
+        }
     }
 
     pub fn status(self: State) Status {
