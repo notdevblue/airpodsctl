@@ -201,6 +201,7 @@ pub const Controller = struct {
                     return error.ProtocolFailure;
                 }
                 if (self.state.routing.confirmed_owns == true) return .{ .switching = status };
+                if (request.force and status.owner == .linux) return .{ .switching = status };
                 if (!request.force and (status.owner == .unknown or status.remote_activity != .idle)) {
                     self.session.channel.failure.set(
                         "remote AirPods activity is not confirmed idle; use switching take --force to override it",

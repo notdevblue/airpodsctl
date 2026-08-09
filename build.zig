@@ -120,6 +120,12 @@ pub fn build(builder: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const bluez_media_module = builder.createModule(.{
+        .root_source_file = builder.path("src/bluez_media.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bluez_module.addImport("bluez_media", bluez_media_module);
     bluez_module.addImport("support", support_module);
     bluez_module.addImport("transport", transport_module);
 
@@ -174,6 +180,7 @@ pub fn build(builder: *std.Build) void {
     });
     server_module.addImport("aacp", aacp_module);
     server_module.addImport("bluez", bluez_module);
+    server_module.addImport("bluez_media", bluez_media_module);
     server_module.addImport("cli", cli_module);
     server_module.addImport("controller", controller_module);
     server_module.addImport("ipc", ipc_module);
@@ -217,6 +224,7 @@ pub fn build(builder: *std.Build) void {
     });
     test_module.addImport("aacp", aacp_module);
     test_module.addImport("battery", battery_module);
+    test_module.addImport("bluez_media", bluez_media_module);
     test_module.addImport("cli", cli_module);
     test_module.addImport("command", command_module);
     test_module.addImport("control_command", control_command_module);

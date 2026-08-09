@@ -1,6 +1,7 @@
 const std = @import("std");
 const aacp = @import("aacp");
 const bluez = @import("bluez");
+const bluez_media = @import("bluez_media");
 const cli = @import("cli");
 const controller = @import("controller");
 const ipc = @import("ipc");
@@ -16,6 +17,7 @@ const ipc_reply_timeout_ms = 1000;
 const initialization_delay_ms = 150;
 const idle_poll_ms = 1000;
 const max_reconnect_delay_ms = 30_000;
+const transport_settlement_ms = 500;
 
 pub const Error = error{ServerFailure};
 
@@ -43,6 +45,8 @@ const Server = struct {
     media_retry_at_ms: i64 = 0,
     reconnect_at_ms: i64 = 0,
     reconnect_delay_ms: i64 = idle_poll_ms,
+    transport_recovery_pending: bool = false,
+    transport_recovery_explicit: bool = false,
     failure: support.ErrorMessage = .{},
 
     fn needsPersistentConnection(self: *const Server) bool {
@@ -55,6 +59,8 @@ const Server = struct {
             support.log(.debug, "Closed the AirPods control connection because its cached protocol state is no longer valid.", .{});
         }
         self.connection = null;
+        self.transport_recovery_pending = false;
+        self.transport_recovery_explicit = false;
         self.wear.reset();
         self.switching.remoteTakeover();
         self.players.clear();
@@ -83,6 +89,172 @@ const Server = struct {
             .multipoint_ready = status.isReady(),
             .remote_idle = status.remote_activity == .idle,
         };
+    }
+
+    fn mediaTransportState(self: *Server, reason: []const u8) ?bluez.MediaTransportState {
+        const connection = self.connection orelse return null;
+        const state = bluez.mediaTransportState(connection.address, &self.failure) catch {
+            support.log(
+                .warn,
+                "BlueZ A2DP transport state is unavailable after {s}: {s}.",
+                .{ reason, self.failure.text() },
+            );
+            self.failure.len = 0;
+            return null;
+        };
+        support.log(
+            .debug,
+            "BlueZ reports the AirPods A2DP transport as '{s}' after {s}.",
+            .{ state.name(), reason },
+        );
+        return state;
+    }
+
+    fn reportTakeTransport(self: *Server, reason: []const u8) void {
+        const state = self.mediaTransportState(reason) orelse return;
+
+        if (self.logged_playing == true and !state.isUsable()) {
+            support.log(
+                .warn,
+                "Linux owns AirPods routing arbitration, but BlueZ reports the A2DP transport as '{s}' while MPRIS is Playing; audio is not yet confirmed usable.",
+                .{state.name()},
+            );
+        }
+    }
+
+    fn scheduleTransportRecovery(self: *Server, explicit: bool) void {
+        self.transport_recovery_pending = true;
+        self.transport_recovery_explicit = explicit;
+    }
+
+    fn ensureTransport(self: *Server) void {
+        if (!self.transport_recovery_pending) return;
+        self.transport_recovery_pending = false;
+
+        const connection = if (self.connection) |*value| value else return;
+        const playback_active = self.logged_playing == true;
+        const explicit_take = self.transport_recovery_explicit;
+        self.transport_recovery_explicit = false;
+        var state = bluez.mediaTransportState(connection.address, &self.failure) catch {
+            self.warnMedia("A2DP recovery was skipped because BlueZ transport state could not be read safely.");
+            self.failure.len = 0;
+            return;
+        };
+        var decision = bluez_media.recoveryDecision(state, playback_active, false, explicit_take);
+        if (decision == .wait) {
+            state = bluez.waitForMediaTransport(
+                connection.address,
+                transport.nowMs() + transport_settlement_ms,
+                &self.failure,
+            ) catch {
+                self.warnMedia("A2DP recovery was skipped because BlueZ transport settlement could not be observed safely.");
+                self.failure.len = 0;
+                return;
+            };
+            decision = bluez_media.recoveryDecision(state, playback_active, true, explicit_take);
+        }
+
+        switch (decision) {
+            .none => {
+                if (playback_active) support.log(
+                    .info,
+                    "Linux audio is usable because BlueZ confirmed that the AirPods A2DP transport is active after routing ownership changed.",
+                    .{},
+                );
+            },
+            .wait => unreachable,
+            .connect_profile => {
+                support.log(
+                    .info,
+                    "Connecting only the AirPods A2DP Sink profile because routing ownership is local but BlueZ has no media transport for the selected device.",
+                    .{},
+                );
+                bluez.connectAudioProfile(connection.address, &self.failure) catch {
+                    self.warnMedia("A2DP profile connection failed because BlueZ could not connect the selected AirPods audio profile.");
+                    self.failure.len = 0;
+                    return;
+                };
+                state = bluez.waitForMediaTransportPresent(
+                    connection.address,
+                    transport.nowMs() + operation_timeout_ms,
+                    &self.failure,
+                ) catch {
+                    self.warnMedia("A2DP profile connection completed, but BlueZ transport creation could not be observed safely.");
+                    self.failure.len = 0;
+                    return;
+                };
+                support.log(
+                    if (state == .absent) .warn else .info,
+                    "BlueZ reports the AirPods A2DP transport as '{s}' after connecting the missing audio profile.",
+                    .{state.name()},
+                );
+            },
+            .fail_closed => support.log(
+                .warn,
+                "A2DP recovery was suppressed because BlueZ reported an unknown transport state while MPRIS was Playing.",
+                .{},
+            ),
+            .reset_profile => {
+                support.log(
+                    .warn,
+                    "Resetting only the AirPods A2DP profile because routing ownership is local, MPRIS is Playing, and BlueZ did not activate the transport during the settlement window.",
+                    .{},
+                );
+                if (self.players.hasOwnership()) {
+                    self.warnMedia("A2DP recovery was suppressed because MPRIS pause ownership is already reserved for wear-aware automatic resume.");
+                    return;
+                }
+                self.players.pausePlayers() catch {
+                    self.warnMedia("A2DP recovery was suppressed because eligible MPRIS players could not be paused safely.");
+                    return;
+                };
+                if (!self.players.hasOwnership()) {
+                    self.warnMedia("A2DP recovery was suppressed because airpodsctl could not confirm ownership of any MPRIS pause transition.");
+                    return;
+                }
+
+                bluez.resetAudioProfile(
+                    connection.address,
+                    transport.nowMs() + operation_timeout_ms,
+                    &self.failure,
+                ) catch {
+                    self.players.resumePlayers() catch {
+                        self.players.clear();
+                    };
+                    self.warnMedia("A2DP profile recovery failed because BlueZ could not reset the selected AirPods audio profile.");
+                    self.failure.len = 0;
+                    return;
+                };
+                self.players.resumePlayers() catch {
+                    self.players.clear();
+                    self.warnMedia("A2DP profile recovery could not resume the MPRIS players that airpodsctl paused.");
+                    return;
+                };
+
+                state = bluez.waitForMediaTransport(
+                    connection.address,
+                    transport.nowMs() + operation_timeout_ms,
+                    &self.failure,
+                ) catch {
+                    self.warnMedia("A2DP profile recovery completed, but BlueZ transport activation could not be observed safely.");
+                    self.failure.len = 0;
+                    return;
+                };
+                if (state.isUsable()) {
+                    support.log(
+                        .info,
+                        "A2DP profile recovery succeeded because BlueZ reports the AirPods transport as active after owned MPRIS playback resumed.",
+                        .{},
+                    );
+                } else {
+                    support.log(
+                        .warn,
+                        "A2DP profile recovery did not produce usable audio because BlueZ still reports the AirPods transport as '{s}'.",
+                        .{state.name()},
+                    );
+                }
+            },
+        }
     }
 
     fn handleControllerEvent(self: *Server, event: controller.Event) void {
@@ -208,10 +380,12 @@ const Server = struct {
                 if (self.switching.service_owns and status.owner != .linux) {
                     support.log(
                         .info,
-                        "Cleared Linux switching ownership because an AirPods routing notification reports that Linux no longer owns audio.",
+                        "Cleared Linux switching ownership because an AirPods routing notification reports that Linux no longer owns routing arbitration.",
                         .{},
                     );
                     self.switching.remoteTakeover();
+                    self.transport_recovery_pending = false;
+                    self.transport_recovery_explicit = false;
                 }
             },
             .listening_mode, .battery, .routing_relay => {},
@@ -274,6 +448,7 @@ const Server = struct {
             "The service connection is usable because Bluetooth, AACP, local-address discovery, and required routing initialization succeeded.",
             .{},
         );
+        _ = self.mediaTransportState("initializing the AirPods control session");
     }
 
     fn ensureConnection(self: *Server) void {
@@ -299,9 +474,9 @@ const Server = struct {
         support.emit(
             .info,
             if (action == .take)
-                "Requesting AirPods audio ownership because a new MPRIS Playing edge satisfied the multipoint, remote-idle, and suppression checks."
+                "Requesting AirPods routing ownership because a new MPRIS Playing edge satisfied the multipoint, remote-idle, and suppression checks."
             else
-                "Releasing AirPods audio ownership because all tracked MPRIS players remained idle for 30 seconds after an automatic take.",
+                "Releasing AirPods routing ownership because all tracked MPRIS players remained idle for 30 seconds after an automatic take.",
         );
         const deadline_ms = transport.nowMs() + operation_timeout_ms;
         const connection = if (self.connection) |*value| value else {
@@ -328,15 +503,19 @@ const Server = struct {
 
         if (action == .take) {
             self.switching.takeSucceeded(transport.nowMs());
+            self.reportTakeTransport("the automatic ownership acknowledgement");
+            self.scheduleTransportRecovery(false);
         } else {
             self.switching.releaseSucceeded();
+            self.transport_recovery_pending = false;
+            self.transport_recovery_explicit = false;
         }
         support.emit(
             .info,
             if (action == .take)
-                "Linux now owns AirPods audio because the ownership acknowledgement confirmed the automatic take."
+                "Linux now owns AirPods routing arbitration because the ownership acknowledgement confirmed the automatic take."
             else
-                "Linux released AirPods audio because the ownership acknowledgement confirmed the automatic release.",
+                "Linux released AirPods routing arbitration because the ownership acknowledgement confirmed the automatic release.",
         );
     }
 
@@ -512,6 +691,8 @@ const Server = struct {
             .status => {},
             .take => {
                 self.switching.takeSucceeded(transport.nowMs());
+                self.reportTakeTransport("the explicit ownership acknowledgement");
+                self.scheduleTransportRecovery(true);
                 support.log(
                     .debug,
                     "Recorded Linux switching ownership because the explicit take received a valid AirPods acknowledgement.",
@@ -520,6 +701,8 @@ const Server = struct {
             },
             .release => {
                 self.switching.releaseSucceeded();
+                self.transport_recovery_pending = false;
+                self.transport_recovery_explicit = false;
                 support.log(
                     .debug,
                     "Cleared Linux switching ownership because the explicit release received a valid AirPods acknowledgement.",
@@ -568,6 +751,7 @@ const Server = struct {
         while ((@as(*volatile c.sig_atomic_t, &stop_requested)).* == 0) {
             self.ensureConnection();
             self.ensurePlayback();
+            self.ensureTransport();
             var descriptors = [_]c.struct_pollfd{
                 .{ .fd = listener, .events = c.POLLIN, .revents = 0 },
                 .{

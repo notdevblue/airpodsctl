@@ -79,7 +79,7 @@ Two additional captures on 2026-08-09 covered an iPhone taking playback from an 
 
 - Add a pure smart-routing module with bounded, exact parsers and encoders for the confirmed ownership, audio-source, smart-routing, local-address, and connected-host packets. Preserve unknown enum values internally and reject malformed known packets without consuming unrelated AACP events.
 - Keep `0x0010`/`0x0011` payloads opaque at the AACP layer and deliver them through the central controller. Add OPACK semantics only from sanitized captures produced by a real Mac competing with the same iPhone and AirPods pair; do not derive the MIT implementation from GPL source code.
-- Extend the selected connection with the local adapter address obtained through `getsockname`; do not add BlueZ pairing, `Connect`, `Disconnect`, or profile-changing calls.
+- Extend the selected connection with the local adapter address obtained through `getsockname` and retain its bounded BlueZ object path for transport inspection. Do not add BlueZ pairing or whole-device `Connect`/`Disconnect` calls.
 - Extend the central controller—the sole AACP reader—with connection-scoped routing state, generation counters, and typed routing events.
 - Serialize routing mutations with existing commands. Use the existing three-second operation deadline and never retry a failed automatic takeover until another qualifying playback edge.
 - When automation is enabled, reconnect the AACP control channel only after BlueZ already reports the AirPods connected. Use bounded exponential retry from one to thirty seconds; never initiate the normal Bluetooth connection.
@@ -112,6 +112,14 @@ After any successful service-initiated take—manual or automatic:
 
 MPRIS is the sole desktop playback trigger. Do not add audio-server route monitoring or stream-triggered switching in this version.
 
+### A2DP transport confirmation and recovery
+
+AACP ownership is routing arbitration, not proof that Linux has an acquired A2DP transport. After a take while MPRIS is Playing, inspect the selected AirPods' BlueZ `MediaTransport1` directly and require the A2DP Source transport to become `active`. Do not consult PipeWire for switching eligibility or default-device policy.
+
+Allow 500 milliseconds for ordinary asynchronous activation. If an explicit take finds that the profile is absent, connect only the selected AirPods' remote A2DP Sink profile; BlueZ represents the corresponding local media transport with the A2DP Source UUID. If active playback instead remains `idle` or `pending`, recovery may reset that Sink profile through `DisconnectProfile` and `ConnectProfile`. A reset must first pause at least one eligible MPRIS player and confirm ownership of that pause, resume only those owned players afterward, retain the AACP control connection, and wait a bounded three seconds for an active transport. Unknown transport states, unavailable MPRIS control, or an unconfirmed pause fail closed without changing the profile. Never disconnect the whole Bluetooth device.
+
+A live fault injection on 2026-08-09 disconnected only the remote A2DP Sink profile while AACP continued to report Linux as the local source. A forced take correctly treated that unconfirmed local source as idempotent, observed that `MediaTransport1` was absent, reconnected the Sink profile, and observed a new idle transport. Resuming the same MPRIS player advanced that transport to active without reconnecting the Bluetooth device or the AACP channel. The test also confirmed that `MediaTransport1.UUID` reports the local Source role (`0x110a`) while `Device1.ConnectProfile` and `DisconnectProfile` require the remote AirPods Sink role (`0x110b`).
+
 ### Setup and safety
 
 Document the manual BlueZ prerequisite identified by LibrePods:
@@ -141,7 +149,7 @@ Hardware acceptance uses AirPods Pro 2 USB-C and an iPhone, recording AirPods fi
 
 - Initial advertised support is AirPods Pro 2 USB-C only; parsers remain model-neutral where verified captures agree.
 - Scope is one AirPods pair and at most two connected hosts.
-- Excluded: Android companion relays, pairing, BLE scanning, changing the default sink, BlueZ profile automation, disconnect-based handoff, automatic call takeover, iPhone-side software, and system configuration writes.
+- Excluded: Android companion relays, pairing, BLE scanning, changing the default sink, whole-device disconnect-based handoff, automatic call takeover, iPhone-side software, and system configuration writes.
 - Graceful behavior is best effort if the service crashes after taking ownership; a restarted service does not infer ownership provenance or release from its initial snapshot.
 
 ## Delivery commits

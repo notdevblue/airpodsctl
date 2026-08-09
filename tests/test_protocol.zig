@@ -1,6 +1,7 @@
 const std = @import("std");
 const aacp = @import("aacp");
 const battery = @import("battery");
+const bluez_media = @import("bluez_media");
 const cli = @import("cli");
 const control_command = @import("control_command");
 const controller = @import("controller");
@@ -82,6 +83,7 @@ const RoutingExchange = struct {
     request: operations.Switching,
     initial_owner: bool,
     send_initial_ownership: bool = true,
+    source_is_local: bool = false,
     activity: smart_routing.AudioSourceState,
     acknowledge: bool = true,
 };
@@ -278,7 +280,11 @@ fn sendOwnership(fd: c_int, owns: bool) bool {
 fn sendRoutingSnapshot(fd: c_int, exchange: *const RoutingExchange) bool {
     const audio_source_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x0d, 0x00 };
     const connected_devices_request = [_]u8{ 0x04, 0x00, 0x04, 0x00, 0x2d, 0x00 };
-    const audio_source = [_]u8{
+    const audio_source = if (exchange.source_is_local) [_]u8{
+        0x04,                            0x00, 0x04, 0x00, 0x0e, 0x00,
+        6,                               5,    4,    3,    2,    1,
+        @intFromEnum(exchange.activity),
+    } else [_]u8{
         0x04,                            0x00, 0x04, 0x00, 0x0e, 0x00,
         12,                              11,   10,   9,    8,    7,
         @intFromEnum(exchange.activity),
@@ -300,6 +306,8 @@ fn emulateRoutingExchange(fd: c_int, exchange: *const RoutingExchange) u8 {
     if (!receiveInitialization(fd) or !sendRoutingSnapshot(fd, exchange)) return 1;
     if (exchange.request.action == .status or
         (exchange.send_initial_ownership and exchange.request.action == .take and exchange.initial_owner) or
+        (!exchange.send_initial_ownership and exchange.request.action == .take and
+            exchange.request.force and exchange.initial_owner) or
         (exchange.send_initial_ownership and exchange.request.action == .release and !exchange.initial_owner) or
         (exchange.request.action == .take and !exchange.request.force and exchange.activity != .idle))
     {
@@ -365,6 +373,46 @@ test "noise-control names and command parsing" {
     try std.testing.expectEqual(noise_control.Mode.transparency, noise_control.Mode.parse("transparency").?);
     try std.testing.expectEqual(noise_control.Mode.adaptive, noise_control.Mode.parse("adaptive").?);
     try std.testing.expect(noise_control.Mode.parse("invalid") == null);
+}
+
+test "BlueZ media transport states are exact and prefer the usable transport" {
+    try std.testing.expectEqual(bluez_media.State.idle, bluez_media.State.parse("idle"));
+    try std.testing.expectEqual(bluez_media.State.pending, bluez_media.State.parse("pending"));
+    try std.testing.expectEqual(bluez_media.State.active, bluez_media.State.parse("active"));
+    try std.testing.expectEqual(bluez_media.State.unknown, bluez_media.State.parse("ACTIVE"));
+    try std.testing.expectEqual(bluez_media.State.unknown, bluez_media.State.parse("new-state"));
+
+    try std.testing.expectEqual(bluez_media.State.idle, bluez_media.State.absent.merge(.idle));
+    try std.testing.expectEqual(bluez_media.State.pending, bluez_media.State.idle.merge(.pending));
+    try std.testing.expectEqual(bluez_media.State.active, bluez_media.State.pending.merge(.active));
+    try std.testing.expectEqual(bluez_media.State.active, bluez_media.State.active.merge(.unknown));
+    try std.testing.expect(bluez_media.State.active.isUsable());
+    try std.testing.expect(!bluez_media.State.pending.isUsable());
+
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.none,
+        bluez_media.recoveryDecision(.idle, false, true, false),
+    );
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.none,
+        bluez_media.recoveryDecision(.active, true, true, false),
+    );
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.wait,
+        bluez_media.recoveryDecision(.idle, true, false, false),
+    );
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.reset_profile,
+        bluez_media.recoveryDecision(.pending, true, true, false),
+    );
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.fail_closed,
+        bluez_media.recoveryDecision(.unknown, true, true, false),
+    );
+    try std.testing.expectEqual(
+        bluez_media.RecoveryDecision.connect_profile,
+        bluez_media.recoveryDecision(.absent, false, true, true),
+    );
 }
 
 test "listening-mode packet parsing" {
@@ -987,9 +1035,19 @@ test "manual switching requires safe state and a matching acknowledgement" {
         .request = .{ .action = .take },
         .initial_owner = true,
         .send_initial_ownership = false,
+        .source_is_local = true,
         .activity = .idle,
     });
     try std.testing.expectEqual(smart_routing.Owner.linux, unconfirmed_local_take.result.?.owner);
+
+    const forced_unconfirmed_local_take = try runRoutingExchange(&.{
+        .request = .{ .action = .take, .force = true },
+        .initial_owner = true,
+        .send_initial_ownership = false,
+        .source_is_local = true,
+        .activity = .idle,
+    });
+    try std.testing.expectEqual(smart_routing.Owner.linux, forced_unconfirmed_local_take.result.?.owner);
 
     const release_result = try runRoutingExchange(&.{
         .request = .{ .action = .release },
