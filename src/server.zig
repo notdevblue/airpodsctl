@@ -214,7 +214,7 @@ const Server = struct {
                     self.switching.remoteTakeover();
                 }
             },
-            .listening_mode, .battery => {},
+            .listening_mode, .battery, .routing_relay => {},
         }
     }
 

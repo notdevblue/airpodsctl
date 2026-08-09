@@ -8,6 +8,7 @@ const ipc = @import("ipc");
 const noise_control = @import("noise_control");
 const operations = @import("command");
 const smart_routing = @import("smart_routing");
+const smart_routing_relay = @import("smart_routing_relay");
 const support = @import("support");
 const switching_policy = @import("switching_policy");
 const transport = @import("transport");
@@ -829,6 +830,85 @@ test "smart-routing packets are exact and bounded" {
     try std.testing.expect((try smart_routing.parsePacket(&.{ 0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0, 0 })) == null);
 }
 
+test "smart-routing relay frames preserve opaque payloads and reject malformed lengths" {
+    const address = smart_routing_relay.Address{ 1, 2, 3, 4, 5, 6 };
+    const payload = [_]u8{ 0xd3, 0x01, 0x02, 0x03 };
+    const expected = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x10, 0x00,
+        1,    2,    3,    4,    5,    6,
+        4,    0,    0xaa, 0xd3, 0x01, 0x02,
+        0x03,
+    };
+
+    const encoded = try smart_routing_relay.encode(.send, address, 0xaa, &payload);
+    try std.testing.expectEqualSlices(u8, &expected, encoded.packet());
+
+    const decoded = (try smart_routing_relay.parse(encoded.packet())).?;
+    try std.testing.expectEqual(smart_routing_relay.Opcode.send, decoded.opcode);
+    try std.testing.expectEqualSlices(u8, &address, &decoded.address);
+    try std.testing.expectEqual(@as(u8, 0xaa), decoded.metadata);
+    try std.testing.expectEqualSlices(u8, &payload, decoded.payload);
+
+    for (4..expected.len) |length| {
+        try std.testing.expectError(
+            error.InvalidRelayPacket,
+            smart_routing_relay.parse(expected[0..length]),
+        );
+    }
+
+    var mismatched_length = expected;
+    mismatched_length[12] = 3;
+    try std.testing.expectError(error.InvalidRelayPacket, smart_routing_relay.parse(&mismatched_length));
+
+    var receive_frame = expected;
+    receive_frame[4] = 0x11;
+    try std.testing.expectEqual(
+        smart_routing_relay.Opcode.receive,
+        (try smart_routing_relay.parse(&receive_frame)).?.opcode,
+    );
+
+    var unrelated = expected;
+    unrelated[4] = 0x12;
+    try std.testing.expect((try smart_routing_relay.parse(&unrelated)) == null);
+
+    const oversized_payload = [_]u8{0} ** (smart_routing_relay.max_payload_size + 1);
+    try std.testing.expectError(
+        error.RelayPayloadTooLarge,
+        smart_routing_relay.encode(.send, address, 0, &oversized_payload),
+    );
+}
+
+test "controller reports smart-routing relay messages without changing ownership state" {
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+
+    var failure = support.ErrorMessage{};
+    const deadline_ms = transport.nowMs() + 1000;
+    var control = controller.Controller{
+        .session = try aacp.Session.initialize(sockets[0], deadline_ms, 0, &failure),
+    };
+    try std.testing.expect(receiveInitialization(sockets[1]));
+
+    const address = smart_routing.Address{ 1, 2, 3, 4, 5, 6 };
+    const payload = [_]u8{ 0xe1, 0x01 };
+    try smart_routing.sendRelay(&control.session, address, 0, &payload);
+
+    var sent: [32]u8 = undefined;
+    const sent_length = c.recv(sockets[1], &sent, sent.len, 0);
+    try std.testing.expect(sent_length > 0);
+
+    var response = sent[0..@intCast(sent_length)];
+    response[4] = @intFromEnum(smart_routing_relay.Opcode.receive);
+    try std.testing.expectEqual(sent_length, c.send(sockets[1], response.ptr, response.len, 0));
+
+    const event = (try control.receiveOne()).?;
+    try std.testing.expectEqual(@as(u64, 1), control.state.relay_generation);
+    try std.testing.expectEqual(smart_routing.Owner.unknown, control.state.routing.status().owner);
+    try std.testing.expectEqualSlices(u8, &payload, event.routing_relay.payload);
+}
+
 test "smart-routing state fails closed" {
     const local = smart_routing.Address{ 1, 2, 3, 4, 5, 6 };
     var devices = smart_routing.ConnectedDevices{
@@ -978,12 +1058,35 @@ test "switching policy suppresses unsafe and contested takeovers" {
     policy.operationFailed();
     try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(3, true, true, eligible));
     _ = policy.updatePlayback(4, false, false, eligible);
-    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(5, true, true, eligible));
-    policy.takeSucceeded(6);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(5, true, true, eligible));
+    _ = policy.updatePlayback(6, false, false, eligible);
+    _ = policy.updatePlayback(2006, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(2007, true, true, eligible));
+    policy.takeSucceeded(2008);
     policy.remoteTakeover();
-    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(7, true, true, eligible));
-    _ = policy.updatePlayback(8, false, false, eligible);
-    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(9, true, true, eligible));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(2009, true, true, eligible));
+    _ = policy.updatePlayback(2010, false, false, eligible);
+    _ = policy.updatePlayback(4010, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(4011, true, true, eligible));
+}
+
+test "switching policy ignores a transient idle bounce after explicit release" {
+    const eligible = switching_policy.Eligibility{
+        .multipoint_ready = true,
+        .remote_idle = true,
+    };
+    var policy = switching_policy.Policy{ .mode = .mpris };
+
+    _ = policy.updatePlayback(0, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(1, true, true, eligible));
+    policy.takeSucceeded(2);
+    policy.releaseSucceeded();
+
+    _ = policy.updatePlayback(3, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(4, true, true, eligible));
+    _ = policy.updatePlayback(5, false, false, eligible);
+    _ = policy.updatePlayback(2005, false, false, eligible);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(2006, true, true, eligible));
 }
 
 test "manual switching ownership adopts the first playback baseline" {

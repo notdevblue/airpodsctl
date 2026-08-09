@@ -62,7 +62,7 @@ The following layouts are protocol research inputs, not completed hardware accep
 | `0x0009` | Both | Fixed control-command frame. Identifier `0x06` carries local ownership as `0x00` or `0x01`; the remaining three value bytes are zero. |
 | `0x000d` | Host to AirPods | Empty Audio Source request. |
 | `0x000e` | AirPods to host | Six-byte Bluetooth address followed by source state: `0x00` idle, `0x01` call, or `0x02` media. An all-zero address reports that neither host is actively streaming and must not overwrite separately acknowledged ownership. Other states remain unknown. |
-| `0x0010`/`0x0011` | Both | Six-byte address, little-endian payload length, one unknown byte, and an opaque OPACK payload. Version 1 does not interpret or emit these messages. |
+| `0x0010`/`0x0011` | Host to AirPods/AirPods to host | Six-byte address, little-endian payload length, one unknown byte, and an opaque OPACK payload. The implementation parses and encodes this envelope exactly, but does not interpret or emit a semantic payload until an independent capture corpus establishes the OPACK schema. |
 | `0x0014` | Host to AirPods | Count followed by six-byte addresses forming a connection-priority list. Version 1 does not change this list. |
 | `0x002d` | Host to AirPods | Empty Connected Devices request. |
 | `0x002e` | AirPods to host | Two unknown bytes, device count, then count entries containing a six-byte address and two unknown bytes. Accept at most two entries. |
@@ -71,11 +71,14 @@ All packets use the existing `04 00 04 00` AACP prefix and a little-endian 16-bi
 
 Live AirPods Pro 2 USB-C captures on 2026-08-09 confirmed that `0x09` identifier `0x06` produces matching `0x01` and `0x00` acknowledgements when arbitration ownership changes. They also confirmed that an idle local `0x000e` source can exist before Linux has received an ownership acknowledgement, and that an all-zero `0x000e` source can follow a confirmed take without relinquishing ownership. The controller must therefore track acknowledged arbitration ownership independently from active-source observations. The broader firmware, call, reconnect, and model acceptance matrix remains incomplete.
 
+Two additional captures on 2026-08-09 covered an iPhone taking playback from an actively streaming Linux host and Linux explicitly taking ownership back. Both transitions used audio-source `0x000e`, connected-host `0x002e`, and ownership-control traffic; neither delivered `0x0011` to Linux. The Linux host was already advertising the feature packet captured from an Intel Mac, an Apple DeviceID vendor, a laptop class, and a Mac-like adapter name. Those identifiers are therefore insufficient by themselves to enroll a separately paired Linux host in Apple's host-to-host relay. The implementation must not send a guessed OPACK message merely to provoke enrollment.
+
 ## Implementation design
 
 ### Protocol and controller state
 
 - Add a pure smart-routing module with bounded, exact parsers and encoders for the confirmed ownership, audio-source, smart-routing, local-address, and connected-host packets. Preserve unknown enum values internally and reject malformed known packets without consuming unrelated AACP events.
+- Keep `0x0010`/`0x0011` payloads opaque at the AACP layer and deliver them through the central controller. Add OPACK semantics only from sanitized captures produced by a real Mac competing with the same iPhone and AirPods pair; do not derive the MIT implementation from GPL source code.
 - Extend the selected connection with the local adapter address obtained through `getsockname`; do not add BlueZ pairing, `Connect`, `Disconnect`, or profile-changing calls.
 - Extend the central controller—the sole AACP reader—with connection-scoped routing state, generation counters, and typed routing events.
 - Serialize routing mutations with existing commands. Use the existing three-second operation deadline and never retry a failed automatic takeover until another qualifying playback edge.
@@ -104,7 +107,7 @@ After any successful service-initiated take—manual or automatic:
 - Release at expiry and require a later play edge before another automatic take.
 - Apply this policy to explicit takes as well as automatic takes.
 - If MPRIS monitoring is lost after a take, arm the same fail-safe release deadline.
-- If the iPhone takes ownership while Linux still reports `Playing`, treat it as intentional: cancel local ownership state and suppress automatic retaking until all players stop and a later play edge occurs.
+- If the iPhone takes ownership while Linux still reports `Playing`, treat it as intentional: cancel local ownership state and suppress automatic retaking until all players remain idle for at least two seconds and a later play edge occurs. This idle debounce prevents a browser's transport interruption from appearing as deliberate stop-and-restart intent during a handoff.
 - Service startup and reconnection never take or release based solely on the initial snapshot.
 
 MPRIS is the sole desktop playback trigger. Do not add audio-server route monitoring or stream-triggered switching in this version.

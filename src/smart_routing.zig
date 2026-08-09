@@ -1,6 +1,7 @@
 const std = @import("std");
 const aacp = @import("aacp");
 const control_command = @import("control_command");
+const smart_routing_relay = @import("smart_routing_relay");
 
 const frame_prefix = [_]u8{ 0x04, 0x00, 0x04, 0x00 };
 const ownership_identifier = 0x06;
@@ -11,7 +12,9 @@ const connected_devices_response_opcode = 0x2e;
 const max_hosts = 2;
 
 pub const Error = aacp.Error;
-pub const Address = [6]u8;
+pub const RelayError = Error || error{RelayPayloadTooLarge};
+pub const Address = smart_routing_relay.Address;
+pub const Relay = smart_routing_relay.Message;
 
 pub const Hosts = enum {
     local_only,
@@ -86,6 +89,7 @@ pub const ConnectedDevices = struct {
 pub const Packet = union(enum) {
     audio_source: AudioSource,
     connected_devices: ConnectedDevices,
+    relay: Relay,
 };
 
 pub const Status = struct {
@@ -201,6 +205,9 @@ pub fn parsePacket(packet: []const u8) error{InvalidRoutingPacket}!?Packet {
     if (packet.len < 6) return error.InvalidRoutingPacket;
 
     const opcode = std.mem.readInt(u16, packet[4..6], .little);
+    if (smart_routing_relay.parse(packet) catch return error.InvalidRoutingPacket) |message| {
+        return .{ .relay = message };
+    }
     if (opcode == audio_source_response_opcode) {
         if (packet.len != 13) return error.InvalidRoutingPacket;
 
@@ -241,4 +248,14 @@ pub fn requestStatus(session: *aacp.Session) Error!void {
 pub fn setOwnership(session: *aacp.Session, owns: bool) Error!void {
     const packet = control_command.encode(ownership_identifier, &.{@intFromBool(owns)}) catch unreachable;
     try session.send(&packet);
+}
+
+pub fn sendRelay(
+    session: *aacp.Session,
+    address: Address,
+    metadata: u8,
+    payload: []const u8,
+) RelayError!void {
+    const frame = try smart_routing_relay.encode(.send, address, metadata, payload);
+    try session.send(frame.packet());
 }

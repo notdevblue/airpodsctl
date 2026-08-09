@@ -65,8 +65,14 @@ pub fn build(builder: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const smart_routing_relay_module = builder.createModule(.{
+        .root_source_file = builder.path("src/smart_routing_relay.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     smart_routing_module.addImport("aacp", aacp_module);
     smart_routing_module.addImport("control_command", control_command_module);
+    smart_routing_module.addImport("smart_routing_relay", smart_routing_relay_module);
 
     const switching_policy_module = builder.createModule(.{
         .root_source_file = builder.path("src/switching_policy.zig"),
@@ -219,6 +225,7 @@ pub fn build(builder: *std.Build) void {
     test_module.addImport("ipc", ipc_module);
     test_module.addImport("noise_control", noise_control_module);
     test_module.addImport("smart_routing", smart_routing_module);
+    test_module.addImport("smart_routing_relay", smart_routing_relay_module);
     test_module.addImport("support", support_module);
     test_module.addImport("switching_policy", switching_policy_module);
     test_module.addImport("transport", transport_module);

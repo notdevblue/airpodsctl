@@ -9,6 +9,8 @@ pub const Action = enum {
     release,
 };
 
+const suppression_idle_ms = 2000;
+
 pub const Eligibility = struct {
     multipoint_ready: bool,
     remote_idle: bool,
@@ -23,6 +25,7 @@ pub const Policy = struct {
     initialized: bool = false,
     playing: bool = false,
     suppressed: bool = false,
+    suppression_idle_at_ms: ?i64 = null,
     operation_pending: bool = false,
     service_owns: bool = false,
     release_at_ms: ?i64 = null,
@@ -52,8 +55,15 @@ pub const Policy = struct {
         self.playing = playing;
         if (playing) {
             self.release_at_ms = null;
+            self.suppression_idle_at_ms = null;
         } else {
-            self.suppressed = false;
+            if (self.suppressed) {
+                if (self.suppression_idle_at_ms == null) self.suppression_idle_at_ms = now_ms;
+                if (now_ms - self.suppression_idle_at_ms.? >= suppression_idle_ms) {
+                    self.suppressed = false;
+                    self.suppression_idle_at_ms = null;
+                }
+            }
             if (self.service_owns and self.release_at_ms == null) self.armRelease(now_ms);
         }
         if (self.mode != .mpris or !play_edge or self.suppressed or self.operation_pending or
@@ -70,6 +80,7 @@ pub const Policy = struct {
         self.operation_pending = false;
         self.service_owns = true;
         self.suppressed = false;
+        self.suppression_idle_at_ms = null;
         self.release_at_ms = null;
         if (!self.playing) self.armRelease(now_ms);
     }
@@ -79,11 +90,13 @@ pub const Policy = struct {
         self.service_owns = false;
         self.release_at_ms = null;
         self.suppressed = self.playing;
+        self.suppression_idle_at_ms = null;
     }
 
     pub fn operationFailed(self: *Policy) void {
         self.operation_pending = false;
         self.suppressed = self.playing;
+        self.suppression_idle_at_ms = null;
     }
 
     pub fn remoteTakeover(self: *Policy) void {
@@ -91,6 +104,7 @@ pub const Policy = struct {
         self.service_owns = false;
         self.release_at_ms = null;
         self.suppressed = self.playing;
+        self.suppression_idle_at_ms = null;
     }
 
     pub fn tick(self: *Policy, now_ms: i64) Action {

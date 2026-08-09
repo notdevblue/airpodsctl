@@ -21,6 +21,7 @@ pub const State = struct {
     audio_source_generation: u64 = 0,
     connected_devices_generation: u64 = 0,
     ownership_generation: u64 = 0,
+    relay_generation: u64 = 0,
 };
 
 pub const Event = union(enum) {
@@ -28,6 +29,7 @@ pub const Event = union(enum) {
     battery: battery.Report,
     wear: wear_detection.WearReport,
     routing: smart_routing.Status,
+    routing_relay: smart_routing.Relay,
 };
 
 fn ignoreEvent(_: ?*anyopaque, _: Event) void {}
@@ -74,6 +76,11 @@ fn loggedEvent(event: Event) Event {
                 status.owner.name(),
                 status.remote_activity.name(),
             },
+        ),
+        .routing_relay => |message| support.log(
+            .debug,
+            "Received an AirPods smart-routing relay '{s}' message with a {d}-byte opaque payload.",
+            .{ message.opcode.name(), message.payload.len },
         ),
     }
     return event;
@@ -124,6 +131,10 @@ pub const Controller = struct {
                         self.state.routing.updateConnectedDevices(devices, local);
                     }
                     self.state.connected_devices_generation +%= 1;
+                },
+                .relay => |message| {
+                    self.state.relay_generation +%= 1;
+                    return loggedEvent(.{ .routing_relay = message });
                 },
             }
             self.state.routing_generation +%= 1;
