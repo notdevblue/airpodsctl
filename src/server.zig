@@ -777,8 +777,8 @@ const Server = struct {
                 const event = self.connection.?.control.receiveOne() catch {
                     support.log(
                         .warn,
-                        "Discarding the AirPods control session because an unsolicited AACP packet could not be received or decoded safely.",
-                        .{},
+                        "Discarding the AirPods control session because an unsolicited AACP packet could not be received or decoded safely: {s}.",
+                        .{self.failure.text()},
                     );
                     self.disconnect();
                     continue;

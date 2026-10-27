@@ -118,7 +118,10 @@ pub const Controller = struct {
             return null;
         }
         if (smart_routing.parsePacket(packet) catch {
-            self.session.channel.failure.set("AirPods returned an invalid smart-routing response", .{});
+            self.session.channel.failure.set(
+                "AirPods returned an invalid smart-routing response (opcode {x}, {d} bytes)",
+                .{ if (packet.len > 4) packet[4] else @as(u8, 0), packet.len },
+            );
             return error.ProtocolFailure;
         }) |routing_packet| {
             switch (routing_packet) {

@@ -9,7 +9,9 @@ const audio_source_request_opcode = 0x0d;
 const audio_source_response_opcode = 0x0e;
 const connected_devices_request_opcode = 0x2d;
 const connected_devices_response_opcode = 0x2e;
-const max_hosts = 2;
+// Connected-host reports can include PC, iPhone, and iPad simultaneously.
+// Bound storage by the receive buffer instead of assuming two host records.
+const max_hosts = (aacp.packet_size - 9) / 8;
 
 pub const Error = aacp.Error;
 pub const RelayError = Error || error{RelayPayloadTooLarge};

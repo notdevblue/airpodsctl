@@ -878,6 +878,52 @@ test "smart-routing packets are exact and bounded" {
     try std.testing.expect((try smart_routing.parsePacket(&.{ 0x04, 0x00, 0x04, 0x00, 0x06, 0x00, 0, 0 })) == null);
 }
 
+test "three-host notifications preserve the active PC control session" {
+    // AirPods report this 33-byte frame with PC, iPhone, and iPad connected.
+    // Keep the PC last so processing must inspect every reported host.
+    const local = smart_routing.Address{ 1, 2, 3, 4, 5, 6 };
+    const connected = [_]u8{
+        0x04, 0x00, 0x04, 0x00, 0x2e, 0x00, 0xaa, 0xbb, 3,
+        7,    8,    9,    10,   11,   12,   0x10, 0x20, 13,
+        14,   15,   16,   17,   18,   0x30, 0x40, 1,    2,
+        3,    4,    5,    6,    0x50, 0x60,
+    };
+    const devices = (try smart_routing.parsePacket(&connected)).?.connected_devices;
+    try std.testing.expectEqual(@as(usize, 3), devices.count);
+    try std.testing.expectEqualSlices(u8, &local, &devices.addresses[2]);
+    try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(connected[0..32]));
+    const padded = connected ++ [_]u8{0};
+    try std.testing.expectError(error.InvalidRoutingPacket, smart_routing.parsePacket(&padded));
+
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_SEQPACKET, 0, &sockets));
+    defer _ = c.close(sockets[0]);
+    defer _ = c.close(sockets[1]);
+    var failure = support.ErrorMessage{};
+    var control = controller.Controller{
+        .session = try aacp.Session.initialize(sockets[0], transport.nowMs() + 1000, 0, &failure),
+        .local_address = local,
+    };
+    try std.testing.expect(receiveInitialization(sockets[1]));
+    control.state.routing.updateOwnership(true);
+    control.state.routing.updateAudioSource(.{ .address = local, .state = .playing }, local);
+
+    for (0..3) |_| {
+        try std.testing.expectEqual(@as(isize, connected.len), c.send(sockets[1], &connected, connected.len, 0));
+        const status = (try control.receiveOne()).?.routing;
+        try std.testing.expect(status.isReady());
+        try std.testing.expectEqual(smart_routing.Owner.linux, status.owner);
+        try std.testing.expectEqual(smart_routing.RemoteActivity.idle, status.remote_activity);
+    }
+    try std.testing.expectEqual(@as(u64, 3), control.state.connected_devices_generation);
+
+    var duplicate_local = devices;
+    duplicate_local.addresses[0] = local;
+    control.state.routing.updateConnectedDevices(duplicate_local, local);
+    try std.testing.expectEqual(smart_routing.Hosts.unknown, control.state.routing.hosts);
+    try std.testing.expect(!control.state.routing.status().isReady());
+}
+
 test "smart-routing relay frames preserve opaque payloads and reject malformed lengths" {
     const address = smart_routing_relay.Address{ 1, 2, 3, 4, 5, 6 };
     const payload = [_]u8{ 0xd3, 0x01, 0x02, 0x03 };

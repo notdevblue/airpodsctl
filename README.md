@@ -1,5 +1,9 @@
 # airpodsctl
 
+This fork of [hacel/airpodsctl](https://github.com/hacel/airpodsctl) fixes repeated control-session reconnects when AirPods report three connected hosts, such as a Linux PC, iPhone, and iPad. Connected-host records are bounded by the AACP receive buffer instead of a fixed two-host limit. A regression test covers repeated three-host notifications while the PC retains routing ownership. This fixes report handling; automatic switching across every combination of devices still needs hardware testing.
+
+Protocol-error diagnostics also include the failing opcode, packet length, and error reason without logging raw packets or Bluetooth addresses. Machine-specific settings and captured device traffic are not included in this repository.
+
 `airpodsctl` is a small Linux command-line utility for reading settings and state from connected AirPods and changing supported settings. Commands are one-shot by default, while an optional foreground session service can retain the AACP Bluetooth connection for faster subsequent operations. The service can also provide opt-in, wear-aware MPRIS media control and experimental multipoint audio switching. There is no tray application, BLE proximity scanner, audio-profile automation, or network listener.
 
 The utility is currently tested with AirPods Pro 2 with USB-C. Other AirPods models that expose the same AACP listening-mode and battery-report protocols may work, but Apple does not publish these protocols and firmware updates can change them.
@@ -109,7 +113,7 @@ The available commands are:
 - `battery`: print the left and right earbud battery levels and charging states. An earbud that is not present in the report is printed as `unavailable`.
 - `battery left|right`: print only the selected earbud's battery percentage. The command waits for a report containing that earbud and fails if the AirPods do not provide one before the overall deadline.
 - `wear-status`: print the most recent primary and secondary AACP wear states. These labels describe protocol roles, not permanent left/right identity. A state is `in-ear`, `out-of-ear`, `in-case`, or `unknown`.
-- `switching status`: request connected-host, ownership, and remote-activity state. `multipoint ready` means two hosts and all required runtime fields were observed; `unverified` can also mean the second host is absent rather than misconfigured.
+- `switching status`: request connected-host, ownership, and remote-activity state. `multipoint ready` means Linux, at least one other host, and all required runtime fields were observed; `unverified` can also mean another host is absent rather than misconfigured.
 - `switching take [--force]`: ask the AirPods to route ownership to Linux. A normal take requires confirmed idle remote activity. `--force` can interrupt iPhone media or a call and should be used only as an intentional override.
 - `switching release`: yield ownership without disconnecting either Bluetooth host or changing a BlueZ audio profile.
 - `serve`: run the persistent foreground session service. `--device MAC` selects which AirPods the service owns. Add `--pause-on-removal=one` or `--pause-on-removal=both` to enable wear-aware MPRIS control, or `--auto-switch=mpris` to enable automatic multipoint takeover; both policies default to `off`.
@@ -127,7 +131,7 @@ AirPods multipoint requires the Linux Bluetooth Device ID to identify as Apple. 
 DeviceID = bluetooth:004C:0000:0000
 ```
 
-Apply it through the distribution's BlueZ configuration, restart Bluetooth, then forget and re-pair the AirPods if the new Device ID is not applied to the existing pairing. This changes the host identity advertised by BlueZ and should be used at your own risk. `airpodsctl` never edits this configuration, requests root, pairs devices, or initiates their normal Bluetooth connection. It reports `multipoint unverified` until two connected hosts and the required routing state are observed at runtime.
+Apply it through the distribution's BlueZ configuration, restart Bluetooth, then forget and re-pair the AirPods if the new Device ID is not applied to the existing pairing. This changes the host identity advertised by BlueZ and should be used at your own risk. `airpodsctl` never edits this configuration, requests root, pairs devices, or initiates their normal Bluetooth connection. It reports `multipoint unverified` until Linux, at least one other connected host, and the required routing state are observed at runtime.
 
 Connect the same AirPods pair to Linux and the iPhone, then enable automatic switching with:
 

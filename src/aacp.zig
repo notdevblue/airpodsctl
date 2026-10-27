@@ -2,7 +2,7 @@ const support = @import("support");
 const transport = @import("transport");
 
 // Bound inbound datagrams well above known frames so oversized responses are rejected.
-const packet_size = 1024;
+pub const packet_size = 1024;
 
 // AirPods expect these observed AACP frames verbatim during protocol initialization.
 const handshake_packet = [_]u8{
