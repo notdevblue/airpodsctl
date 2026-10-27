@@ -54,7 +54,7 @@ pub const usage =
     \\                    Pause MPRIS players while serving (default: off)
     \\      --force       Allow switching take to interrupt remote activity
     \\      --auto-switch MODE
-    \\                    Take on safe MPRIS play edges while serving (default: off)
+    \\                    off, mpris, or mpris-priority (default: off)
     \\  -h, --help        Show this help
     \\  -V, --version     Show the program version
     \\
@@ -100,6 +100,7 @@ fn parsePauseOnRemoval(value: []const u8) ?command.PauseOnRemoval {
 fn parseAutoSwitch(value: []const u8) ?switching_policy.Mode {
     if (std.mem.eql(u8, value, "off")) return .off;
     if (std.mem.eql(u8, value, "mpris")) return .mpris;
+    if (std.mem.eql(u8, value, "mpris-priority")) return .mpris_priority;
     return null;
 }
 

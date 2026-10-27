@@ -50,7 +50,7 @@ const Server = struct {
     failure: support.ErrorMessage = .{},
 
     fn needsPersistentConnection(self: *const Server) bool {
-        return self.wear.mode != .off or self.switching.mode == .mpris;
+        return self.wear.mode != .off or self.switching.mode != .off;
     }
 
     fn disconnect(self: *Server) void {
@@ -427,7 +427,7 @@ const Server = struct {
             "The AirPods control session is ready because its handshake and notification subscription completed.",
             .{},
         );
-        if (self.switching.mode == .mpris) {
+        if (self.switching.mode != .off) {
             support.log(
                 .debug,
                 "Requesting initial AirPods routing state because automatic switching must prove multipoint readiness and remote idleness.",
@@ -474,7 +474,7 @@ const Server = struct {
         support.emit(
             .info,
             if (action == .take)
-                "Requesting AirPods routing ownership because a new MPRIS Playing edge satisfied the multipoint, remote-idle, and suppression checks."
+                "Requesting AirPods routing ownership because the configured playback policy satisfied the multipoint, remote-idle, and suppression checks."
             else
                 "Releasing AirPods routing ownership because all tracked MPRIS players remained idle for 30 seconds after an automatic take.",
         );
@@ -532,12 +532,25 @@ const Server = struct {
         }
 
         const previous_release = self.switching.release_at_ms;
-        const eligibility = self.switchingEligibility();
+        var eligibility = self.switchingEligibility();
+        if (self.switching.mode == .mpris_priority and update.playing and
+            !self.switching.priority_armed and self.connection != null and
+            self.connection.?.control.state.routing.status().owner == .linux)
+        {
+            if (self.mediaTransportState("checking existing local playback")) |state| {
+                eligibility.local_streaming = state == .active;
+            }
+        }
         const action = self.switching.updatePlayback(
             transport.nowMs(),
             update.playing,
             update.play_edge,
             eligibility,
+        );
+        if (action == .take and !update.play_edge) support.log(
+            .info,
+            "Retaining active PC playback because priority mode confirmed a local stream or a previous take, and the remote host is idle; attempt {d}/3.",
+            .{self.switching.priority_takes},
         );
         if (update.play_edge) support.log(
             .debug,

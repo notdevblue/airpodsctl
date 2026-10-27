@@ -574,6 +574,8 @@ test "serve auto-switch parsing is opt in" {
     try std.testing.expect(disabled == .serve);
     try std.testing.expectEqual(switching_policy.Mode.off, disabled.serve.auto_switch);
     try std.testing.expectEqual(switching_policy.Mode.mpris, enabled.serve.auto_switch);
+    const priority = cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=mpris-priority" });
+    try std.testing.expectEqual(switching_policy.Mode.mpris_priority, priority.serve.auto_switch);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=invalid" }) == .usage);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "serve", "--auto-switch=mpris", "--auto-switch=off" }) == .usage);
     try std.testing.expect(cli.parseInvocation(&.{ "airpodsctl", "status", "--auto-switch=mpris" }) == .usage);
@@ -1206,6 +1208,70 @@ test "manual switching ownership adopts the first playback baseline" {
     _ = policy.updatePlayback(30_002, false, false, blocked);
     try std.testing.expectEqual(switching_policy.Action.none, policy.tick(60_001));
     try std.testing.expectEqual(switching_policy.Action.release, policy.tick(60_002));
+}
+
+test "priority mode adopts only a confirmed local playback baseline" {
+    const idle = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = true };
+    const local = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = true, .local_streaming = true };
+    var policy = switching_policy.Policy{ .mode = .mpris_priority };
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(0, true, true, idle));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(1000, true, false, idle));
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(2000, true, false, local));
+    policy.takeSucceeded(2001);
+    policy.remoteTakeover();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(6999, true, false, idle));
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(7000, true, false, idle));
+}
+
+test "priority recovery waits for idle remote activity and respects explicit release" {
+    const local = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = true, .local_streaming = true };
+    const active = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = false };
+    const unknown = switching_policy.Eligibility{ .multipoint_ready = false, .remote_idle = true };
+    var policy = switching_policy.Policy{ .mode = .mpris_priority };
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(0, true, false, local));
+    policy.takeSucceeded(1);
+    policy.remoteTakeover();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(5000, true, false, active));
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(5001, true, false, unknown));
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(5002, true, false, local));
+    policy.takeSucceeded(5003);
+    policy.releaseSucceeded();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(11_000, true, false, local));
+    policy.remoteTakeover();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(12_000, true, false, local));
+    _ = policy.updatePlayback(12_001, false, false, local);
+    _ = policy.updatePlayback(14_001, false, false, local);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(14_002, true, true, local));
+}
+
+test "priority recovery has a bounded budget and stops after a failed take" {
+    const local = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = true, .local_streaming = true };
+    var policy = switching_policy.Policy{ .mode = .mpris_priority };
+    for (0..3) |attempt| {
+        const now: i64 = @intCast(attempt * 5000);
+        try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(now, true, false, local));
+        policy.takeSucceeded(now + 1);
+        policy.remoteTakeover();
+    }
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(20_000, true, false, local));
+    _ = policy.updatePlayback(20_001, false, false, local);
+    _ = policy.updatePlayback(22_001, false, false, local);
+    try std.testing.expectEqual(switching_policy.Action.take, policy.updatePlayback(22_002, true, true, local));
+    policy.operationFailed();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(30_000, true, false, local));
+}
+
+test "priority mode stops retaining playback when the PC is paused" {
+    const local = switching_policy.Eligibility{ .multipoint_ready = true, .remote_idle = true, .local_streaming = true };
+    var policy = switching_policy.Policy{ .mode = .mpris_priority };
+    _ = policy.updatePlayback(0, true, false, local);
+    policy.takeSucceeded(1);
+    _ = policy.updatePlayback(2, false, false, local);
+    try std.testing.expect(!policy.priority_armed);
+    try std.testing.expectEqual(switching_policy.Action.none, policy.tick(30_001));
+    try std.testing.expectEqual(switching_policy.Action.release, policy.tick(30_002));
+    policy.releaseSucceeded();
+    try std.testing.expectEqual(switching_policy.Action.none, policy.updatePlayback(40_000, false, false, local));
 }
 
 test "wear status CLI and IPC variants are explicit" {
